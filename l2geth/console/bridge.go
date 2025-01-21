@@ -26,7 +26,6 @@ import (
 	"github.com/robertkrimen/otto"
 
 	"github.com/MetisProtocol/mvm/l2geth/accounts/scwallet"
-	"github.com/MetisProtocol/mvm/l2geth/accounts/usbwallet"
 	"github.com/MetisProtocol/mvm/l2geth/log"
 	"github.com/MetisProtocol/mvm/l2geth/rpc"
 )
@@ -109,16 +108,6 @@ func (b *bridge) OpenWallet(call otto.FunctionCall) (response otto.Value) {
 
 	// Wallet open failed, report error unless it's a PIN or PUK entry
 	switch {
-	case strings.HasSuffix(err.Error(), usbwallet.ErrTrezorPINNeeded.Error()):
-		val, err = b.readPinAndReopenWallet(call)
-		if err == nil {
-			return val
-		}
-		val, err = b.readPassphraseAndReopenWallet(call)
-		if err != nil {
-			throwJSException(err.Error())
-		}
-
 	case strings.HasSuffix(err.Error(), scwallet.ErrPairingPasswordNeeded.Error()):
 		// PUK input requested, fetch from the user and call open again
 		if input, err := b.prompter.PromptPassword("Please enter the pairing password: "); err != nil {
