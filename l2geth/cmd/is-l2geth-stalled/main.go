@@ -42,6 +42,8 @@ func SaveLocalState(block *LocalState, file string) error {
 	return json.NewEncoder(fd).Encode(block)
 }
 
+var maxDuration = time.Minute * 15
+
 func main() {
 	var (
 		FilePath string
@@ -90,9 +92,17 @@ func main() {
 	var now = time.Now().UTC()
 	switch {
 	case pending == 0:
-		stuck = local != nil && latest.Number.Uint64() == local.Number && now.Sub(local.LastSeen) > StalledDuration
+		if local != nil && latest.Number.Uint64() == local.Number {
+			duration := now.Sub(local.LastSeen)
+			if duration > StalledDuration && duration < maxDuration {
+				stuck = true
+			}
+		}
 	case pending > 0:
-		stuck = now.Sub(time.Unix(int64(latest.Time), 0)) > StalledDuration
+		duration := now.Sub(time.Unix(int64(latest.Time), 0))
+		if duration > StalledDuration && duration < maxDuration {
+			stuck = true
+		}
 	}
 
 	if stuck {
