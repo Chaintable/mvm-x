@@ -17,7 +17,6 @@ require (
 	github.com/elastic/gosigar v0.12.0
 	github.com/ethereum/go-ethereum v1.10.16
 	github.com/fatih/color v1.7.0
-	github.com/fjl/memsize v0.0.1
 	github.com/gballet/go-libpcsclite v0.0.0-20191108122812-4678299bea08
 	github.com/go-resty/resty/v2 v2.4.0
 	github.com/go-stack/stack v1.8.1
