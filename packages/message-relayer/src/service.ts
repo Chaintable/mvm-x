@@ -11,7 +11,7 @@ import {
   loadContract,
   loadContractFromManager,
   predeploys,
-} from '@localtest911/contracts'
+} from '@metis.io/contracts'
 import { StateRootBatchHeader, SentMessage, SentMessageProof } from './types'
 import mongoose from 'mongoose'
 import ChainStore from './store/chain-store'

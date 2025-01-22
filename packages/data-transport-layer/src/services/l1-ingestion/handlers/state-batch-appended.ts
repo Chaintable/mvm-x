@@ -1,5 +1,5 @@
 /* Imports: External */
-import { getContractDefinition } from '@localtest911/contracts'
+import { getContractDefinition } from '@metis.io/contracts'
 import { Interface, toNumber, ethers } from 'ethersv6'
 
 /* Imports: Internal */
