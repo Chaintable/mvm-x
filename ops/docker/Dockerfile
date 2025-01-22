@@ -120,6 +120,9 @@ ENTRYPOINT ["./relayer.sh"]
 FROM node:18-alpine as batch-submitter
 RUN apk add --no-cache curl bash jq ca-certificates
 
+FROM node:18-alpine as batch-submitter
+RUN apk add --no-cache curl bash jq ca-certificates
+
 WORKDIR /opt/optimism
 
 # copy top level files
