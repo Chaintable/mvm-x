@@ -6,7 +6,7 @@ import {
   toHexString,
   toRpcHexString,
 } from '@metis.io/core-utils'
-import { getContractInterface, predeploys } from '@localtest911/contracts'
+import { getContractInterface, predeploys } from '@metis.io/contracts'
 import * as rlp from 'rlp'
 import { MerkleTree } from 'merkletreejs'
 
