@@ -17,24 +17,24 @@
 package core
 
 import (
-  crand "crypto/rand"
-  "errors"
-  "fmt"
-  "math"
-  "math/big"
-  mrand "math/rand"
-  "sync/atomic"
-  "time"
+	crand "crypto/rand"
+	"errors"
+	"fmt"
+	"math"
+	"math/big"
+	mrand "math/rand"
+	"sync/atomic"
+	"time"
 
-  lru "github.com/hashicorp/golang-lru"
+	lru "github.com/hashicorp/golang-lru"
 
-  "github.com/MetisProtocol/mvm/l2geth/common"
-  "github.com/MetisProtocol/mvm/l2geth/consensus"
-  "github.com/MetisProtocol/mvm/l2geth/core/rawdb"
-  "github.com/MetisProtocol/mvm/l2geth/core/types"
-  "github.com/MetisProtocol/mvm/l2geth/ethdb"
-  "github.com/MetisProtocol/mvm/l2geth/log"
-  "github.com/MetisProtocol/mvm/l2geth/params"
+	"github.com/MetisProtocol/mvm/l2geth/common"
+	"github.com/MetisProtocol/mvm/l2geth/consensus"
+	"github.com/MetisProtocol/mvm/l2geth/core/rawdb"
+	"github.com/MetisProtocol/mvm/l2geth/core/types"
+	"github.com/MetisProtocol/mvm/l2geth/ethdb"
+	"github.com/MetisProtocol/mvm/l2geth/log"
+	"github.com/MetisProtocol/mvm/l2geth/params"
 )
 
 const (
