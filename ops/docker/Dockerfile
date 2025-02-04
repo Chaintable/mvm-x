@@ -1,5 +1,5 @@
 #syntax=docker/dockerfile:1
-FROM node:18-bullseye-slim as builder
+FROM node:18-bullseye-slim AS builder
 RUN apt update -y \
     && apt install -y git python3 pkg-config libusb-1.0-0-dev make g++ gcc build-essential libudev-dev
 WORKDIR /optimism
@@ -24,7 +24,7 @@ RUN yarn build
 RUN yarn workspace @eth-optimism/integration-tests build
 
 
-FROM node:18-alpine as deployer
+FROM node:18-alpine AS deployer
 RUN apk add --update --no-cache git curl python3 bash jq ca-certificates
 
 WORKDIR /opt/optimism/
@@ -57,7 +57,7 @@ COPY --chmod=775 ./ops/scripts/deployer.sh .
 ENTRYPOINT yarn run deploy
 
 
-FROM node:18-alpine as data-transport-layer
+FROM node:18-alpine AS data-transport-layer
 RUN apk add --no-cache curl bash jq ca-certificates
 
 WORKDIR /opt/optimism
@@ -87,7 +87,7 @@ COPY --chmod=775 ./ops/scripts/dtl.sh .
 VOLUME [ "/data" ]
 ENTRYPOINT ["./dtl.sh"]
 
-FROM node:18-alpine as message-relayer
+FROM node:18-alpine AS message-relayer
 RUN apk add --no-cache curl bash jq ca-certificates
 
 WORKDIR /opt/optimism
@@ -117,10 +117,7 @@ COPY --from=builder /optimism/packages/message-relayer/node_modules ./node_modul
 COPY  --chmod=775 ./ops/scripts/relayer.sh .
 ENTRYPOINT ["./relayer.sh"]
 
-FROM node:18-alpine as batch-submitter
-RUN apk add --no-cache curl bash jq ca-certificates
-
-FROM node:18-alpine as batch-submitter
+FROM node:18-alpine AS batch-submitter
 RUN apk add --no-cache curl bash jq ca-certificates
 
 WORKDIR /opt/optimism
