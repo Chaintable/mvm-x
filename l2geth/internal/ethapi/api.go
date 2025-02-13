@@ -973,6 +973,9 @@ func (s *PublicBlockChainAPI) Call(ctx context.Context, args CallArgs, blockNrOr
 	if overrides != nil {
 		accounts = *overrides
 	}
+	if args.GasPrice != nil && args.Gas == nil {
+		return nil, fmt.Errorf("gas must be specified if gasPrice is specified")
+	}
 	result, _, failed, err := DoCall(ctx, s.b, args, blockNrOrHash, accounts, &vm.Config{}, 5*time.Second, s.b.RPCGasCap())
 	if err != nil {
 		return nil, err
@@ -1032,6 +1035,11 @@ func DoEstimateGas(ctx context.Context, b Backend, args CallArgs, blockNrOrHash 
 	// }
 
 	ctx = context.WithValue(ctx, "IsEstimate", true)
+
+	// Don't allow the gas price to be set
+	if args.GasPrice != nil {
+		args.GasPrice = nil
+	}
 
 	if args.Gas != nil && uint64(*args.Gas) >= params.TxGas {
 		hi = uint64(*args.Gas)
@@ -1102,15 +1110,7 @@ func DoEstimateGas(ctx context.Context, b Backend, args CallArgs, blockNrOrHash 
 // given transaction against the current pending block. This is modified to
 // encode the fee in wei as gas price is always 1
 func (s *PublicBlockChainAPI) EstimateGas(ctx context.Context, args CallArgs, blockNrOrHash *rpc.BlockNumberOrHash) (hexutil.Uint64, error) {
-	bNrOrHash := rpc.BlockNumberOrHashWithNumber(rpc.PendingBlockNumber)
-	if s.b.IsRpcProxySupport() {
-		bNrOrHash = rpc.BlockNumberOrHashWithNumber(rpc.LatestBlockNumber)
-	} else {
-		// backup sequencer model check
-		if rpc.LatestBlockNumber > rpc.PendingBlockNumber && rpc.LatestBlockNumber > 0 {
-			bNrOrHash = rpc.BlockNumberOrHashWithNumber(rpc.LatestBlockNumber)
-		}
-	}
+	bNrOrHash := rpc.BlockNumberOrHashWithNumber(rpc.LatestBlockNumber)
 	if blockNrOrHash != nil {
 		bNrOrHash = *blockNrOrHash
 	}
