@@ -57,7 +57,7 @@ COPY --chmod=775 ./ops/scripts/deployer.sh .
 ENTRYPOINT yarn run deploy
 
 
-FROM node:18-alpine AS data-transport-layer
+FROM node:18-alpine AS dtl
 RUN apk add --no-cache curl bash jq ca-certificates
 
 WORKDIR /opt/optimism
@@ -87,7 +87,7 @@ COPY --chmod=775 ./ops/scripts/dtl.sh .
 VOLUME [ "/data" ]
 ENTRYPOINT ["./dtl.sh"]
 
-FROM node:18-alpine AS message-relayer
+FROM node:18-alpine AS relayer
 RUN apk add --no-cache curl bash jq ca-certificates
 
 WORKDIR /opt/optimism

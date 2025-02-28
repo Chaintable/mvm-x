@@ -8,14 +8,14 @@ services:
     build:
       context: ..
       dockerfile: ./ops/docker/Dockerfile
-      target: data-transport-layer
+      target: dtl
 
   relayer:
     image: metisdao/relayer:${VERSION:-dev}
     build:
       context: ..
       dockerfile: ./ops/docker/Dockerfile
-      target: message-relayer
+      target: relayer
 
   batch-submitter:
     image: metisdao/batch-submitter:${VERSION:-dev}

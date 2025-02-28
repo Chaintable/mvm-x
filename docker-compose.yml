@@ -61,7 +61,7 @@ services:
     build:
       context: .
       dockerfile: ./ops/docker/Dockerfile
-      target: data-transport-layer
+      target: dtl
     entrypoint: ./dtl.sh
     environment:
       # used for setting the address manager address
