@@ -2,8 +2,7 @@ import { ethers, Signer, toBigInt, toNumber } from 'ethersv6'
 import * as ynatm from '@eth-optimism/ynatm'
 
 import { YnatmAsync } from '../utils'
-import { calcBlobFee } from '../da/eip4844'
-import { ceil } from 'lodash'
+import { Logger } from '@eth-optimism/common-ts'
 
 export interface ResubmissionConfig {
   resubmissionTimeout: number
@@ -19,6 +18,29 @@ export type SubmitTransactionFn = (
 export interface TxSubmissionHooks {
   beforeSendTransaction: (tx: ethers.TransactionRequest) => void
   onTransactionResponse: (txResponse: ethers.TransactionResponse) => void
+}
+
+export const checkGasFee = (
+  logger: Logger,
+  transactionSubmitter: any,
+  tx: any
+) => {
+  const yntmSubmmiter = transactionSubmitter as YnatmTransactionSubmitter
+
+  const gasCapInWei = ethers.parseUnits(
+    yntmSubmmiter.ynatmConfig.maxGasPriceInGwei.toString(10),
+    'gwei'
+  )
+  if (toBigInt(tx.maxFeePerGas) > gasCapInWei) {
+    logger.error('Gas price exceeds the cap', {
+      max: gasCapInWei,
+      current: toNumber(tx.maxFeePerGas),
+    })
+
+    throw new Error(
+      `Gas price ${tx.maxFeePerGas} exceeds the cap ${yntmSubmmiter.ynatmConfig.maxGasPriceInGwei}`
+    )
+  }
 }
 
 const getGasPriceInWei = async (signer: Signer): Promise<number> => {
@@ -40,11 +62,12 @@ export const submitTransactionWithYNATM = async (
     let fullTx: any
     if (isEIP1559) {
       // to be compatible with EIP-1559, we need to set the gasPrice to the maxPriorityFeePerGas
-      const feeScalingFactor = gasPrice
-        ? gasPrice / toNumber(tx.maxFeePerGas)
-        : 1
-      await calculateEIP1559GasPrice(signer.provider, tx, feeScalingFactor)
-      fullTx = tx
+      const feeData = await signer.provider.getFeeData()
+      fullTx = {
+        ...tx,
+        maxFeePerGas: feeData.maxFeePerGas,
+        maxPriorityFeePerGas: feeData.maxPriorityFeePerGas,
+      }
     } else {
       fullTx = {
         ...tx,
@@ -184,24 +207,4 @@ export class YnatmTransactionSubmitter implements TransactionSubmitter {
       hooks
     )
   }
-}
-
-export const calculateEIP1559GasPrice = async (
-  provider: ethers.Provider,
-  tx: ethers.TransactionRequest,
-  scalingFactor: number
-) => {
-  const latestFee = await provider.getFeeData()
-  const baseFee = latestFee.maxFeePerGas - latestFee.maxPriorityFeePerGas
-
-  // only scale the priority fee
-  tx.maxPriorityFeePerGas = toBigInt(
-    ceil(toNumber(tx.maxPriorityFeePerGas) * scalingFactor)
-  )
-  // use the latest base fee
-  tx.maxFeePerGas = baseFee + tx.maxPriorityFeePerGas
-  // scale the blob fee as well
-  tx.maxFeePerBlobGas = toBigInt(
-    ceil(toNumber(tx.maxFeePerBlobGas) * scalingFactor)
-  )
 }

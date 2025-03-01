@@ -2,6 +2,7 @@
 import { Promise as bPromise } from 'bluebird'
 import {
   ethers,
+  JsonRpcProvider,
   Provider,
   Signer,
   toBeHex,
@@ -26,7 +27,7 @@ import {
 
 /* Internal Imports */
 import {
-  calculateEIP1559GasPrice,
+  checkGasFee,
   MpcClient,
   TransactionSubmitter,
   YnatmTransactionSubmitter,
@@ -43,7 +44,6 @@ import {
 } from '../da/types'
 import { CompressionAlgo } from '../da/channel-compressor'
 import { MAX_BLOB_NUM_PER_TX, MAX_BLOB_SIZE, TX_GAS } from '../da/consts'
-import { calcBlobFee } from '../da/eip4844'
 import { SpanBatch } from '../da/span-batch'
 
 export class TransactionBatchSubmitterInbox {
@@ -220,23 +220,11 @@ export class TransactionBatchSubmitterInbox {
         }
 
         // async fetch required info
-        const [latestBlockPromise, feeDataPromise, noncePromise] = [
-          this.l1Provider.getBlock('latest'),
-          this.l1Provider.getFeeData(),
-          signer.provider.getTransactionCount(signerAddress),
-        ]
-        const [latestBlock, feeData, nonce] = await Promise.all([
-          latestBlockPromise,
-          feeDataPromise,
-          noncePromise,
-        ])
+        const nonce = await signer.provider.getTransactionCount(signerAddress)
 
-        const maxFeePerBlobGas = calcBlobFee(latestBlock.excessBlobGas)
         this.logger.info('submitting blob tx', {
           blobCount: blobs.length,
-          maxFeePerBlobGas: toNumber(maxFeePerBlobGas),
           signerAddress,
-          feeData,
           nonce,
         })
 
@@ -250,45 +238,22 @@ export class TransactionBatchSubmitterInbox {
           nonce,
           blobs,
           blobVersionedHashes: blobs.map((blob) => blob.versionedHash),
-          maxFeePerBlobGas,
-          // use eip1559
-          maxFeePerGas: feeData.maxFeePerGas,
-          maxPriorityFeePerGas: feeData.maxPriorityFeePerGas,
         }
 
         // mpc model can use ynatm
         let submitTx: () => Promise<TransactionReceipt>
         if (mpcUrl) {
           submitTx = (): Promise<TransactionReceipt> => {
-            const yntmSubmmiter =
-              transactionSubmitter as YnatmTransactionSubmitter
             return transactionSubmitter.submitSignedTransaction(
               blobTx,
               async (gasPrice) => {
-                if (gasPrice > 0) {
-                  const feeScalingFactor =
-                    gasPrice / toNumber(blobTx.maxFeePerGas)
-                  await calculateEIP1559GasPrice(
-                    signer.provider,
-                    blobTx,
-                    feeScalingFactor
-                  )
-                  if (
-                    toBigInt(blobTx.maxFeePerGas) >
-                    ethers.parseUnits(
-                      yntmSubmmiter.ynatmConfig.maxGasPriceInGwei.toString(10),
-                      'gwei'
-                    )
-                  ) {
-                    this.logger.error('Gas price exceeds the cap', {
-                      max: yntmSubmmiter.ynatmConfig.maxGasPriceInGwei,
-                      current: toNumber(blobTx.maxFeePerGas),
-                    })
-                    throw new Error(
-                      `Gas price ${blobTx.maxFeePerGas} exceeds the cap ${yntmSubmmiter.ynatmConfig.maxGasPriceInGwei}`
-                    )
-                  }
-                }
+                const feeData = await this.l1Provider.getFeeData()
+                blobTx.maxFeePerGas = feeData.maxFeePerGas
+                blobTx.maxPriorityFeePerGas = feeData.maxPriorityFeePerGas
+                blobTx.maxFeePerBlobGas =
+                  (await this.getBlobBaseFee()) * toBigInt(2)
+
+                checkGasFee(this.logger, transactionSubmitter, blobTx)
 
                 const signedTx = await mpcClient.signTx(
                   blobTx,
@@ -361,6 +326,7 @@ export class TransactionBatchSubmitterInbox {
       }
       const mpcAddress = mpcInfo.mpc_address
 
+      tx.type = 2
       tx.nonce = await signer.provider.getTransactionCount(mpcAddress)
       tx.gasLimit = await signer.provider.estimateGas({
         to: tx.to,
@@ -375,8 +341,12 @@ export class TransactionBatchSubmitterInbox {
           tx,
           async (gasPrice) => {
             try {
-              tx.gasPrice =
-                gasPrice || (await this.l1Provider.getFeeData()).gasPrice
+              const feeData = await this.l1Provider.getFeeData()
+              tx.maxFeePerGas = feeData.maxFeePerGas
+              tx.maxPriorityFeePerGas = feeData.maxPriorityFeePerGas
+
+              checkGasFee(this.logger, transactionSubmitter, tx)
+
               const signedTx = await mpcClient.signTx(
                 tx,
                 mpcInfo.mpc_id,
@@ -776,5 +746,11 @@ export class TransactionBatchSubmitterInbox {
     const zerosToPad = targetLength - inputString.length
     const paddedString = '0'.repeat(zerosToPad) + inputString
     return paddedString
+  }
+
+  private async getBlobBaseFee(): Promise<bigint> {
+    return toBigInt(
+      await (this.l1Provider as JsonRpcProvider).send('eth_blobBaseFee', [])
+    )
   }
 }
