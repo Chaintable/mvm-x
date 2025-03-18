@@ -431,7 +431,8 @@ func (m *gameCreator) handleDisputeGameRequest(event *DisputeGameRequest, timest
 		return err
 	}
 
-	if uint64(time.Now().UTC().Unix())-fraudProofWindow > timestamp {
+	currentTime := uint64(time.Now().UTC().Unix())
+	if currentTime > fraudProofWindow && currentTime-fraudProofWindow > timestamp {
 		m.logger.Info("dispute game request has expired", "request", crypto.Keccak256Hash(requestUUID).Hex())
 		return nil
 	}
@@ -478,6 +479,11 @@ func (m *gameCreator) handleDisputeGameRequest(event *DisputeGameRequest, timest
 
 	receipt, err := m.txMgr.Send(m.ctx, txCandidate)
 	if err != nil {
+		if !shouldRetry(err) {
+			m.logger.Info("failed to send game creation transaction, but we cannot do anything here, ignoring...", "err", err)
+			return nil
+		}
+
 		return err
 	}
 
@@ -558,9 +564,11 @@ func (m *gameCreator) createDisputeGameRequest(event *StateBatchAppended) error 
 
 			receipt, err := m.txMgr.Send(m.ctx, txCandidate)
 			if err != nil {
-				return fmt.Errorf("failed to send approve token transaction: %w", err)
-			}
-			if receipt.Status != ethtypes.ReceiptStatusSuccessful {
+				if !shouldRetry(err) {
+					m.logger.Info("failed to approve token", "err", err)
+					return nil
+				}
+			} else if receipt != nil && receipt.Status != ethtypes.ReceiptStatusSuccessful {
 				return errors.New("approve token transaction reverted")
 			}
 
@@ -575,6 +583,10 @@ func (m *gameCreator) createDisputeGameRequest(event *StateBatchAppended) error 
 
 	receipt, err := m.txMgr.Send(m.ctx, txCandidate)
 	if err != nil {
+		if !shouldRetry(err) {
+			m.logger.Info("failed to send dispute transaction, but we cannot do anything here, ignoring...", "err", err)
+			return nil
+		}
 		return fmt.Errorf("failed to send dispute transaction: %w", err)
 	}
 
@@ -689,4 +701,9 @@ func (m *gameCreator) StartMonitoring() {
 
 func (m *gameCreator) StopMonitoring() {
 	m.cancel()
+}
+
+func shouldRetry(err error) bool {
+	// do not retry on invalid txs
+	return err != nil && !strings.Contains(err.Error(), "failed to estimate gas") && !strings.Contains(err.Error(), "failed to call")
 }
