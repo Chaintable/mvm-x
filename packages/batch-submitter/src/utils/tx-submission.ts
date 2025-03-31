@@ -10,6 +10,7 @@ import * as ynatm from '@eth-optimism/ynatm'
 
 import { YnatmAsync } from '../utils'
 import { Logger } from '@eth-optimism/common-ts'
+import { PendingRecordInfo } from '../storage/pending-storage'
 
 export interface ResubmissionConfig {
   resubmissionTimeout: number
@@ -23,20 +24,62 @@ export type SubmitTransactionFn = (
 ) => Promise<ethers.TransactionReceipt>
 
 export interface TxSubmissionHooks {
-  beforeSendTransaction: (tx: ethers.TransactionRequest) => void
-  onTransactionResponse: (txResponse: ethers.TransactionResponse) => void
+  beforeSendTransaction: (tx: ethers.TransactionRequest) => Promise<void>
+  onTransactionResponse: (
+    txResponse: ethers.TransactionResponse
+  ) => Promise<void>
+  onTxReceipt: (receipt: ethers.TransactionReceipt) => Promise<void>
 }
 
 export const setTxEIP1559Fees = async (
   tx: any,
+  oldTx: PendingRecordInfo | null,
   l1Provider: Provider,
+  resubmissionTimeout: number,
   blobTx: boolean = false
 ): Promise<void> => {
   const feeData = await l1Provider.getFeeData()
-  tx.maxFeePerGas = feeData.maxFeePerGas * 2n
-  tx.maxPriorityFeePerGas = feeData.maxPriorityFeePerGas
-  if (blobTx) {
-    tx.maxFeePerBlobGas = (await getBlobBaseFee(l1Provider)) * 2n
+  // check if pending tx exists and has not been confirmed yet,
+  // also need to check if the resubmission timeout has passed,
+  // will only bump the fees if the timeout has passed
+  if (
+    oldTx &&
+    Date.now() - oldTx.submissionTime > resubmissionTimeout &&
+    oldTx.nonce === tx.nonce &&
+    !(await l1Provider.getTransactionReceipt(oldTx.txHash))
+  ) {
+    // pending tx exists, need to bump
+    // for blob tx we need to double all fees,
+    // for non-blob tx we need to bump maxFeePerGas and maxPriorityFeePerGas by 11% (using 11% instead of 10% to avoid rounding issues).
+    const bumpThreshold = blobTx ? 100n : 11n
+    const bumpedMaxFeePerGas =
+      (toBigInt(oldTx.maxFeePerGas) * (100n + bumpThreshold)) / 100n
+    const bumpedMaxPriorityFeePerGas =
+      (toBigInt(oldTx.maxPriorityFeePerGas) * (100n + bumpThreshold)) / 100n
+    const newMaxFeePerGas = feeData.maxFeePerGas * 2n
+
+    tx.maxFeePerGas =
+      bumpedMaxFeePerGas > newMaxFeePerGas
+        ? bumpedMaxFeePerGas
+        : newMaxFeePerGas
+    tx.maxPriorityFeePerGas =
+      bumpedMaxPriorityFeePerGas > feeData.maxPriorityFeePerGas
+        ? bumpedMaxPriorityFeePerGas
+        : feeData.maxPriorityFeePerGas
+    if (blobTx) {
+      const bumpedMaxFeePerBlobGas = toBigInt(oldTx.maxFeePerBlobGas) * 2n
+      const newMaxFeePerBlobGas = (await getBlobBaseFee(l1Provider)) * 2n
+      tx.maxFeePerBlobGas =
+        newMaxFeePerBlobGas > bumpedMaxFeePerBlobGas
+          ? newMaxFeePerBlobGas
+          : bumpedMaxFeePerBlobGas
+    }
+  } else {
+    tx.maxFeePerGas = feeData.maxFeePerGas * 2n
+    tx.maxPriorityFeePerGas = feeData.maxPriorityFeePerGas
+    if (blobTx) {
+      tx.maxFeePerBlobGas = (await getBlobBaseFee(l1Provider)) * 2n
+    }
   }
 }
 
@@ -145,14 +188,16 @@ export const submitTransactionWithYNATM = async (
       }
     }
 
-    hooks.beforeSendTransaction(fullTx)
+    await hooks.beforeSendTransaction(fullTx)
     try {
       const txResponse = await signer.sendTransaction(fullTx)
-      hooks.onTransactionResponse(txResponse)
-      return signer.provider.waitForTransaction(
+      await hooks.onTransactionResponse(txResponse)
+      const receipt = await signer.provider.waitForTransaction(
         txResponse.hash,
         numConfirmations
       )
+      await hooks.onTxReceipt(receipt)
+      return receipt
     } catch (err) {
       console.error('Error sending transaction:', err)
       throw err
@@ -187,15 +232,17 @@ export const submitSignedTransactionWithYNATM = async (
       signedTx
     ): Promise<ethers.TransactionReceipt> => {
       try {
-        hooks.beforeSendTransaction(tx)
+        await hooks.beforeSendTransaction(tx)
         const txResponse = await signer.provider.broadcastTransaction(signedTx)
-        hooks.onTransactionResponse(txResponse)
-        return signer.provider.waitForTransaction(
+        await hooks.onTransactionResponse(txResponse)
+        const txReceipt = await signer.provider.waitForTransaction(
           txResponse.hash,
           numConfirmations
         )
+        await hooks.onTxReceipt(txReceipt)
+        return txReceipt
       } catch (e) {
-        console.error('Error sending transaction:', e.message.substring(0, 100))
+        console.error('Error sending transaction:', e.message.substring(0, 200))
         throw e
       }
     }
@@ -244,6 +291,7 @@ export class YnatmTransactionSubmitter implements TransactionSubmitter {
       hooks = {
         beforeSendTransaction: () => undefined,
         onTransactionResponse: () => undefined,
+        onTxReceipt: () => undefined,
       }
     }
     return submitTransactionWithYNATM(
@@ -264,6 +312,7 @@ export class YnatmTransactionSubmitter implements TransactionSubmitter {
       hooks = {
         beforeSendTransaction: () => undefined,
         onTransactionResponse: () => undefined,
+        onTxReceipt: () => undefined,
       }
     }
     return submitSignedTransactionWithYNATM(
