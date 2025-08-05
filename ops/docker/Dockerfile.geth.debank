@@ -1,5 +1,8 @@
 FROM ubuntu:24.04
 
+ARG ACCESS_TOKEN
+
+RUN git config --global url."https://x-access-token:${ACCESS_TOKEN}@github.com".insteadOf "https://github.com"
 
 # Make sure workdir is root path.
 WORKDIR /
