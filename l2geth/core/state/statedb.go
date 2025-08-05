@@ -119,6 +119,8 @@ type StateDB struct {
 	StorageHashes  time.Duration
 	StorageUpdates time.Duration
 	StorageCommits time.Duration
+
+	OnLog func(log *types.Log)
 }
 
 // Create a new state from a given trie.
@@ -180,6 +182,9 @@ func (s *StateDB) AddLog(log *types.Log) {
 	log.BlockHash = s.bhash
 	log.TxIndex = uint(s.txIndex)
 	log.Index = s.logSize
+	if s.OnLog != nil {
+		s.OnLog(log)
+	}
 	s.logs[s.thash] = append(s.logs[s.thash], log)
 	s.logSize++
 }

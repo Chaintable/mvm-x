@@ -1,0 +1,78 @@
+name: Release Image
+
+on:
+  release:
+    types:
+      - created
+  workflow_dispatch:
+
+defaults:
+  run:
+    working-directory: ./l2geth
+
+env:
+  REGISTRY: 294354037686.dkr.ecr.ap-northeast-1.amazonaws.com
+  IMAGE: metis-l2geth-x
+  IMAGE_DAO: metis-dao-x
+jobs:
+  build-image:
+    strategy:
+      matrix:
+        arch: [amd64]
+    runs-on: [self-hosted, '${{ matrix.arch }}']
+
+    steps:
+      - name: Install Go
+        uses: actions/setup-go@v2
+        with:
+          go-version: 1.20.x
+
+      - name: Checkout code
+        uses: actions/checkout@v2
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - uses: tibdex/github-app-token@v2
+        id: generate-token
+        with:
+          app_id: ${{ secrets.RELEASE_MANAGER_APP_ID }}
+          private_key: ${{ secrets.RELEASE_MANAGER_APP_SECRET }}
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-region: ap-northeast-1
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set env
+        run: |
+          echo "REVISION=${GITHUB_REF#refs/*/}" >> $GITHUB_ENV
+
+      - name: make geth
+        run: |
+          git config --global url."https://${{ steps.generate-token.outputs.token }}:x-oauth-basic@github.com/DeBankDeFi".insteadOf "https://github.com/DeBankDeFi"
+          make geth
+
+      - name: Docker build and push
+        run: |
+          docker build -t ${REGISTRY}/${IMAGE}:${{matrix.arch}}-${REVISION} -f ../ops/docker/Dockerfile.geth.debank ..
+          docker push ${REGISTRY}/${IMAGE}:${{matrix.arch}}-${REVISION}
+          docker rmi ${REGISTRY}/${IMAGE}:${{matrix.arch}}-${REVISION}
+
+      - name: Docker build and push for dao
+        run: |
+          docker build --target dtl -t ${REGISTRY}/${IMAGE_DAO}:${{matrix.arch}}-${REVISION} -f ../ops/docker/Dockerfile ..
+          docker push ${REGISTRY}/${IMAGE_DAO}:${{matrix.arch}}-${REVISION}
+          docker rmi ${REGISTRY}/${IMAGE_DAO}:${{matrix.arch}}-${REVISION}
+
+      - name: comment PR
+        uses: unsplash/comment-on-pr@master
+        env:
+          GITHUB_TOKEN: ${{ steps.generate-token.outputs.token }}
+        with:
+          msg: 'Docker image built: ${{ env.REGISTRY }}/${{ env.IMAGE }}:${{matrix.arch}}-${{ env.REVISION }} :tada:'
+          check_for_duplicate_msg: true
+        continue-on-error: true

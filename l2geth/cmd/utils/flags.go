@@ -955,6 +955,16 @@ var (
 		Value:  "",
 		EnvVar: "SEQ_BRIDGE_URL",
 	}
+
+	VMTraceFlag = &cli.StringFlag{
+		Name:  "vmtrace",
+		Usage: "Name of tracer which should record internal VM operations (costly)",
+	}
+	VMTraceJsonConfigFlag = &cli.StringFlag{
+		Name:  "vmtrace.jsonconfig",
+		Usage: "Tracer configuration (JSON)",
+		Value: "{}",
+	}
 )
 
 // MakeDataDir retrieves the currently requested data directory, terminating
@@ -1843,6 +1853,14 @@ func SetEthConfig(ctx *cli.Context, stack *node.Node, cfg *eth.Config) {
 		cfg.Genesis = core.DeveloperGenesisBlock(uint64(ctx.GlobalInt(DeveloperPeriodFlag.Name)), developer.Address)
 		if !ctx.GlobalIsSet(MinerGasPriceFlag.Name) && !ctx.GlobalIsSet(MinerLegacyGasPriceFlag.Name) {
 			cfg.Miner.GasPrice = big.NewInt(1)
+		}
+	}
+
+	// VM tracing config.
+	if ctx.IsSet(VMTraceFlag.Name) {
+		if name := ctx.String(VMTraceFlag.Name); name != "" {
+			cfg.VMTrace = name
+			cfg.VMTraceJsonConfig = ctx.String(VMTraceJsonConfigFlag.Name)
 		}
 	}
 }

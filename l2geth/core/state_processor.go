@@ -17,6 +17,7 @@
 package core
 
 import (
+	"github.com/Chaintable/pipeline/tracer"
 	"github.com/MetisProtocol/mvm/l2geth/common"
 	"github.com/MetisProtocol/mvm/l2geth/consensus"
 	"github.com/MetisProtocol/mvm/l2geth/consensus/misc"
@@ -24,6 +25,7 @@ import (
 	"github.com/MetisProtocol/mvm/l2geth/core/types"
 	"github.com/MetisProtocol/mvm/l2geth/core/vm"
 	"github.com/MetisProtocol/mvm/l2geth/crypto"
+	"github.com/MetisProtocol/mvm/l2geth/log"
 	"github.com/MetisProtocol/mvm/l2geth/params"
 	"github.com/MetisProtocol/mvm/l2geth/rollup/fees"
 	"github.com/MetisProtocol/mvm/l2geth/rollup/rcfg"
@@ -63,6 +65,16 @@ func (p *StateProcessor) Process(block *types.Block, statedb *state.StateDB, cfg
 		allLogs  []*types.Log
 		gp       = new(GasPool).AddGas(block.GasLimit())
 	)
+	// Iterate over and process the individual transactions
+	var pipelineTracer *tracer.PipelineTracer
+	if p, ok := cfg.Tracer.(*tracer.PipelineTracer); !ok {
+		log.Crit("vmConfig.Tracer must be a pipeline.Tracer")
+	} else {
+		pipelineTracer = p
+		statedb.OnLog = p.OnLog
+		cfg.TracerExt = p
+		cfg.Debug = true
+	}
 	// Mutate the block and state according to any hard-fork specs
 	if p.config.DAOForkSupport && p.config.DAOForkBlock != nil && p.config.DAOForkBlock.Cmp(block.Number()) == 0 {
 		misc.ApplyDAOHardFork(statedb)
@@ -70,7 +82,15 @@ func (p *StateProcessor) Process(block *types.Block, statedb *state.StateDB, cfg
 	// Iterate over and process the individual transactions
 	for i, tx := range block.Transactions() {
 		statedb.Prepare(tx.Hash(), block.Hash(), i)
+		if pipelineTracer != nil {
+			msg, _ := tx.AsMessage(types.MakeSigner(p.config, header.Number))
+			pipelineTracer.OnTxStart(
+				tx, msg.From())
+		}
 		receipt, err := ApplyTransaction(p.config, p.bc, nil, gp, statedb, header, tx, usedGas, cfg)
+		if pipelineTracer != nil {
+			pipelineTracer.OnTxEnd(receipt, err)
+		}
 		if err != nil {
 			return nil, nil, 0, err
 		}

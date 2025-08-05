@@ -889,11 +889,16 @@ func opStop(pc *uint64, interpreter *EVMInterpreter, contract *Contract, memory 
 
 func opSuicide(pc *uint64, interpreter *EVMInterpreter, contract *Contract, memory *Memory, stack *Stack) ([]byte, error) {
 	balance := interpreter.evm.StateDB.GetBalance(contract.Address())
-	interpreter.evm.StateDB.AddBalance(common.BigToAddress(stack.pop()), balance)
+	to := common.BigToAddress(stack.pop())
+	interpreter.evm.StateDB.AddBalance(to, balance)
 
 	interpreter.evm.StateDB.Suicide(contract.Address())
 	if rcfg.UsingOVM && interpreter.evm.chainConfig.IsSDUpdate(interpreter.evm.BlockNumber) {
 		interpreter.evm.StateDB.SubBalance(contract.Address(), balance)
+	}
+	if tracer := interpreter.evm.vmConfig.TracerExt; tracer != nil {
+		tracer.CaptureEnter(SELFDESTRUCT, contract.Address(), to, []byte{}, 0, balance)
+		tracer.CaptureExit([]byte{}, 0, nil)
 	}
 	return nil, nil
 }

@@ -183,4 +183,9 @@ type Config struct {
 
 	// Optimism Rollup Config
 	Rollup rollup.Config
+
+	// Enables VM tracing
+	VMTrace string
+
+	VMTraceJsonConfig string
 }

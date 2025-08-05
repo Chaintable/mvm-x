@@ -18,11 +18,15 @@
 package core
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"math/big"
 	mrand "math/rand"
+	"net/http"
+	"os"
+	"slices"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -30,6 +34,9 @@ import (
 
 	lru "github.com/hashicorp/golang-lru"
 
+	"github.com/Chaintable/pipeline/tracer"
+	ptypes "github.com/Chaintable/pipeline/types"
+	"github.com/Chaintable/pipeline/util"
 	"github.com/MetisProtocol/mvm/l2geth/common"
 	"github.com/MetisProtocol/mvm/l2geth/common/mclock"
 	"github.com/MetisProtocol/mvm/l2geth/common/prque"
@@ -178,6 +185,8 @@ type BlockChain struct {
 	badBlocks       *lru.Cache                     // Bad block cache
 	shouldPreserve  func(*types.Block) bool        // Function used to determine whether should preserve the given block.
 	terminateInsert func(common.Hash, uint64) bool // Testing hook used to terminate ancient receipt chain insertion.
+
+	hooks *Hooks
 }
 
 // NewBlockChain returns a fully initialised block chain using information
@@ -294,9 +303,54 @@ func NewBlockChain(db ethdb.Database, cacheConfig *CacheConfig, chainConfig *par
 			}
 		}
 	}
+	if vmConfig.Tracer != nil {
+		if _, ok := vmConfig.Tracer.(*tracer.PipelineTracer); !ok {
+			log.Crit("vmConfig.Tracer must be a pipeline.Tracer")
+		} else {
+			bc.hooks = BuildHooks(vmConfig.Tracer.(*tracer.PipelineTracer))
+		}
+	}
+
+	if bc.hooks != nil && bc.hooks.OnBlockchainInit != nil {
+		bc.hooks.OnBlockchainInit(chainConfig)
+	}
+	if bc.hooks != nil && bc.hooks.OnGenesisBlock != nil {
+		if block := bc.CurrentBlock(); block.Number().Uint64() == 0 {
+			alloc, err := getGenesisState()
+			if err != nil {
+				return nil, fmt.Errorf("failed to get genesis state: %w", err)
+			}
+			if alloc == nil {
+				return nil, errors.New("live blockchain tracer requires genesis alloc to be set")
+			}
+			bc.hooks.OnGenesisBlock(bc.genesisBlock, alloc)
+		}
+	}
 	// Take ownership of this particular state
 	go bc.update()
 	return bc, nil
+}
+
+func getGenesisState() (alloc GenesisAlloc, err error) {
+	url := os.Getenv("ROLLUP_STATE_DUMP_PATH")
+	if len(url) == 0 {
+		url = "https://metisprotocol.github.io/metis-networks/andromeda-mainnet/state-dump.latest.json"
+	}
+	client := &http.Client{}
+	resp, err := client.Get(url)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	genesis := new(Genesis)
+	if err := json.Unmarshal(data, genesis); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal genesis state: %w", err)
+	}
+	return genesis.Alloc, nil
 }
 
 func (bc *BlockChain) getProcInterrupt() bool {
@@ -869,6 +923,10 @@ func (bc *BlockChain) Stop() {
 		if size, _ := triedb.Size(); size != 0 {
 			log.Error("Dangling trie nodes after full cleanup")
 		}
+	}
+
+	if bc.hooks != nil && bc.hooks.OnClose != nil {
+		bc.hooks.OnClose()
 	}
 
 	log.Info("Blockchain manager stopped")
@@ -1476,6 +1534,46 @@ func (bc *BlockChain) writeBlockWithState(block *types.Block, receipts []*types.
 		if emitHeadEvent {
 			bc.chainHeadFeed.Send(ChainHeadEvent{Block: block})
 		}
+
+		// 先确保 pipeline tracer 不为空，然后再判断是否需要push kafka
+		// 上一个push kafka的block, 必然存在(至少有genesis block)
+		// 上一个push kafka的block比当前的head block还要新，说明有unwind回退，不需要处理, 即使是fork，等有更新的block的时候再一起push
+		if tracer.NodeXPusher != nil && !tracer.NodeXPusher.IsBackup && tracer.NodeXPusher.LastPushedBlock().BlockNumber <= block.NumberU64() {
+			lastPushBlock := tracer.NodeXPusher.LastPushedBlock()
+			_, dropBlocks, newBlocks := bc.getCommonAncestor(*lastPushBlock, ptypes.BlockContext{
+				BlockNumber: block.NumberU64(),
+				Hash:        block.Hash(),
+				ParentHash:  block.ParentHash(),
+				Timestamp:   block.Time(),
+			})
+			var blockChange *ptypes.BlockChangeNotification
+			if len(dropBlocks) > 0 {
+				blockChange = &ptypes.BlockChangeNotification{
+					ChangeType: 2,
+					NewBlocks:  newBlocks,
+					DropBlocks: dropBlocks,
+				}
+			} else if len(newBlocks) > 0 {
+				blockChange = &ptypes.BlockChangeNotification{
+					ChangeType: 1,
+					NewBlocks:  newBlocks,
+				}
+			}
+
+			parent := bc.GetHeaderByHash(block.Header().ParentHash)
+
+			if parent.Root == block.Root() {
+				bc.hooks.OnCommit(parent.Root, block.Root(), nil, nil, nil, nil, nil, nil)
+			}
+
+			if blockChange != nil {
+				err := tracer.NodeXPusher.PushBlockChangeNotification(blockChange)
+				if err != nil {
+					log.Error("SetCanonical PushBlockChangeNotification error", "err", err)
+				}
+				log.Info("NodeXPusher PushBlockChangeNotification", "blockChange", blockChange)
+			}
+		}
 	} else {
 		bc.chainSideFeed.Send(ChainSideEvent{Block: block})
 	}
@@ -1788,7 +1886,13 @@ func (bc *BlockChain) insertChainWithFunc(chain types.Blocks, verifySeals bool, 
 		}
 		// Process block using the parent state as reference point
 		substart := time.Now()
+		if bc.hooks != nil && bc.hooks.OnBlockStart != nil {
+			bc.hooks.OnBlockStart(block)
+		}
 		receipts, logs, usedGas, err := bc.processor.Process(block, statedb, bc.vmConfig)
+		if bc.hooks != nil && bc.hooks.OnBlockEnd != nil {
+			bc.hooks.OnBlockEnd(err)
+		}
 		if err != nil {
 			bc.reportBlock(block, receipts, err)
 			atomic.StoreUint32(&followupInterrupt, 1)
@@ -2122,7 +2226,13 @@ func (bc *BlockChain) insertChainWithFuncAndCh(chain types.Blocks, verifySeals b
 
 		// Process block using the parent state as reference point
 		substart := time.Now()
+		if bc.hooks != nil && bc.hooks.OnBlockStart != nil {
+			bc.hooks.OnBlockStart(block)
+		}
 		receipts, logs, usedGas, err := bc.processor.Process(block, statedb, bc.vmConfig)
+		if bc.hooks != nil && bc.hooks.OnBlockEnd != nil {
+			bc.hooks.OnBlockEnd(err)
+		}
 		if err != nil {
 			bc.reportBlock(block, receipts, err)
 			atomic.StoreUint32(&followupInterrupt, 1)
@@ -2722,4 +2832,79 @@ func (bc *BlockChain) SubscribeLogsEvent(ch chan<- []*types.Log) event.Subscript
 // block processing has started while false means it has stopped.
 func (bc *BlockChain) SubscribeBlockProcessingEvent(ch chan<- bool) event.Subscription {
 	return bc.scope.Track(bc.blockProcFeed.Subscribe(ch))
+}
+
+func (bc *BlockChain) GetHeaderByHash2(blockHash common.Hash) *types.Header {
+	header := bc.GetHeaderByHash(blockHash)
+	if header == nil {
+		if tracer.NodeXPusher != nil {
+			header := &types.Header{}
+			err := util.DownloadFileFromS3Json(tracer.NodeXPusher.Uploader, tracer.NodeXPusher.Bucket, fmt.Sprintf("%s/%s/block", tracer.BizChainID, blockHash.String()), header)
+			if err != nil {
+				log.Error("GetHeaderByHash2 DownloadFileFromS3Json error", "err", err)
+				return nil
+			} else {
+				return header
+			}
+		}
+	}
+	return header
+}
+
+// 返回两个块的共同祖先，以及两个块的从共同祖先到两个块的路径,即drop和new
+func (bc *BlockChain) getCommonAncestor(blocka ptypes.BlockContext, blockb ptypes.BlockContext) (ptypes.BlockContext, []ptypes.BlockContext, []ptypes.BlockContext) {
+	var (
+		chainA, chainB []ptypes.BlockContext
+	)
+	if blockb.ParentHash == blocka.Hash {
+		return blocka, chainA, []ptypes.BlockContext{blockb}
+	}
+	for blockb.BlockNumber > blocka.BlockNumber {
+		chainB = append(chainB, blockb)
+		headerb := bc.GetHeaderByHash2(blockb.ParentHash)
+		if headerb == nil {
+			log.Crit("Failed to get header by hash", "hash", blockb.ParentHash)
+		} else {
+			blockb = ptypes.BlockContext{
+				BlockNumber: headerb.Number.Uint64(),
+				Hash:        headerb.Hash(),
+				ParentHash:  headerb.ParentHash,
+				Timestamp:   headerb.Time,
+			}
+		}
+	}
+	for blocka.Hash != blockb.Hash {
+		chainA = append(chainA, blocka)
+		headera := bc.GetHeaderByHash2(blocka.ParentHash)
+		if headera == nil {
+			log.Crit("Failed to get header by hash", "hash", blocka.ParentHash)
+		} else {
+			blocka = ptypes.BlockContext{
+				BlockNumber: headera.Number.Uint64(),
+				Hash:        headera.Hash(),
+				ParentHash:  headera.ParentHash,
+				Timestamp:   headera.Time,
+			}
+		}
+
+		chainB = append(chainB, blockb)
+		headerb := bc.GetHeaderByHash2(blockb.ParentHash)
+		if headerb == nil {
+			log.Crit("Failed to get header by hash", "hash", blockb.ParentHash)
+		} else {
+			blockb = ptypes.BlockContext{
+				BlockNumber: headerb.Number.Uint64(),
+				Hash:        headerb.Hash(),
+				ParentHash:  headerb.ParentHash,
+				Timestamp:   headerb.Time,
+			}
+		}
+	}
+	// now blocka == blockb == ancestor
+
+	// reverse chainA
+	slices.Reverse(chainA)
+	// reverse chainB
+	slices.Reverse(chainB)
+	return blocka, chainA, chainB
 }

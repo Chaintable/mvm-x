@@ -239,6 +239,10 @@ func (evm *EVM) Call(caller ContractRef, addr common.Address, input []byte, gas 
 				evm.vmConfig.Tracer.CaptureStart(caller.Address(), addr, false, input, gas, value)
 				evm.vmConfig.Tracer.CaptureEnd(ret, 0, 0, nil)
 			}
+			if evm.vmConfig.Debug && evm.depth != 0 && evm.vmConfig.TracerExt != nil {
+				evm.vmConfig.TracerExt.CaptureEnter(CALL, caller.Address(), addr, input, gas, value)
+				evm.vmConfig.TracerExt.CaptureExit(ret, 0, nil)
+			}
 			return nil, gas, nil
 		}
 		evm.StateDB.CreateAccount(addr)
@@ -258,6 +262,12 @@ func (evm *EVM) Call(caller ContractRef, addr common.Address, input []byte, gas 
 
 		defer func() { // Lazy evaluation of the parameters
 			evm.vmConfig.Tracer.CaptureEnd(ret, gas-contract.Gas, time.Since(start), err)
+		}()
+	}
+	if evm.vmConfig.Debug && evm.depth != 0 && evm.vmConfig.TracerExt != nil {
+		evm.vmConfig.TracerExt.CaptureEnter(CALL, caller.Address(), addr, input, gas, value)
+		defer func() {
+			evm.vmConfig.TracerExt.CaptureExit(ret, gas-contract.Gas, err)
 		}()
 	}
 	ret, err = run(evm, contract, input, false)
@@ -299,6 +309,14 @@ func (evm *EVM) CallCode(caller ContractRef, addr common.Address, input []byte, 
 		snapshot = evm.StateDB.Snapshot()
 		to       = AccountRef(caller.Address())
 	)
+
+	if evm.vmConfig.Debug && evm.vmConfig.TracerExt != nil {
+		evm.vmConfig.TracerExt.CaptureEnter(CALLCODE, caller.Address(), addr, input, gas, value)
+		defer func(startGas uint64) {
+			evm.vmConfig.TracerExt.CaptureExit(ret, startGas-gas, err)
+		}(gas)
+	}
+
 	// Initialise a new contract and set the code that is to be used by the EVM.
 	// The contract is a scoped environment for this execution context only.
 	contract := NewContract(caller, to, value, gas)
@@ -332,6 +350,18 @@ func (evm *EVM) DelegateCall(caller ContractRef, addr common.Address, input []by
 		snapshot = evm.StateDB.Snapshot()
 		to       = AccountRef(caller.Address())
 	)
+
+	// Invoke tracer hooks that signal entering/exiting a call frame
+	if evm.vmConfig.Debug && evm.vmConfig.TracerExt != nil {
+		// NOTE: caller must, at all times be a contract. It should never happen
+		// that caller is something other than a Contract.
+		parent := caller.(*Contract)
+		// DELEGATECALL inherits value from parent call
+		evm.vmConfig.TracerExt.CaptureEnter(DELEGATECALL, caller.Address(), addr, input, gas, parent.value)
+		defer func(startGas uint64) {
+			evm.vmConfig.TracerExt.CaptureExit(ret, startGas-gas, err)
+		}(gas)
+	}
 
 	// Initialise a new contract and make initialise the delegate values
 	contract := NewContract(caller, to, nil, gas).AsDelegate()
@@ -375,6 +405,14 @@ func (evm *EVM) StaticCall(caller ContractRef, addr common.Address, input []byte
 	// future scenarios
 	evm.StateDB.AddBalance(addr, bigZero)
 
+	// Invoke tracer hooks that signal entering/exiting a call frame
+	if evm.vmConfig.Debug && evm.vmConfig.TracerExt != nil {
+		evm.vmConfig.TracerExt.CaptureEnter(STATICCALL, caller.Address(), addr, input, gas, nil)
+		defer func(startGas uint64) {
+			evm.vmConfig.TracerExt.CaptureExit(ret, startGas-gas, err)
+		}(gas)
+	}
+
 	// When an error was returned by the EVM or when setting the creation code
 	// above we revert to the snapshot and consume any gas remaining. Additionally
 	// when we're in Homestead this also counts for code storage gas errors.
@@ -401,7 +439,7 @@ func (c *codeAndHash) Hash() common.Hash {
 }
 
 // create creates a new contract using code as deployment code.
-func (evm *EVM) create(caller ContractRef, codeAndHash *codeAndHash, gas uint64, value *big.Int, address common.Address) ([]byte, common.Address, uint64, error) {
+func (evm *EVM) create(caller ContractRef, codeAndHash *codeAndHash, gas uint64, value *big.Int, address common.Address, typ OpCode) ([]byte, common.Address, uint64, error) {
 	// Depth check execution. Fail if we're trying to execute above the
 	// limit.
 	if evm.depth > int(params.CallCreateDepth) {
@@ -466,6 +504,10 @@ func (evm *EVM) create(caller ContractRef, codeAndHash *codeAndHash, gas uint64,
 	if evm.vmConfig.Debug && evm.depth == 0 {
 		evm.vmConfig.Tracer.CaptureStart(caller.Address(), address, true, codeAndHash.code, gas, value)
 	}
+	if evm.vmConfig.Debug && evm.depth != 0  && evm.vmConfig.TracerExt != nil{
+		evm.vmConfig.TracerExt.CaptureEnter(typ, caller.Address(), address, codeAndHash.code, gas, value)
+	}
+
 	start := time.Now()
 
 	ret, err := run(evm, contract, nil, false)
@@ -501,6 +543,9 @@ func (evm *EVM) create(caller ContractRef, codeAndHash *codeAndHash, gas uint64,
 	if evm.vmConfig.Debug && evm.depth == 0 {
 		evm.vmConfig.Tracer.CaptureEnd(ret, gas-contract.Gas, time.Since(start), err)
 	}
+	if evm.vmConfig.Debug && evm.depth != 0 && evm.vmConfig.TracerExt != nil {
+		evm.vmConfig.TracerExt.CaptureExit(ret, gas-contract.Gas, err)
+	}
 	return ret, address, contract.Gas, err
 
 }
@@ -508,7 +553,7 @@ func (evm *EVM) create(caller ContractRef, codeAndHash *codeAndHash, gas uint64,
 // Create creates a new contract using code as deployment code.
 func (evm *EVM) Create(caller ContractRef, code []byte, gas uint64, value *big.Int) (ret []byte, contractAddr common.Address, leftOverGas uint64, err error) {
 	contractAddr = crypto.CreateAddress(caller.Address(), evm.StateDB.GetNonce(caller.Address()))
-	return evm.create(caller, &codeAndHash{code: code}, gas, value, contractAddr)
+	return evm.create(caller, &codeAndHash{code: code}, gas, value, contractAddr, CREATE)
 }
 
 // Create2 creates a new contract using code as deployment code.
@@ -518,7 +563,7 @@ func (evm *EVM) Create(caller ContractRef, code []byte, gas uint64, value *big.I
 func (evm *EVM) Create2(caller ContractRef, code []byte, gas uint64, endowment *big.Int, salt *big.Int) (ret []byte, contractAddr common.Address, leftOverGas uint64, err error) {
 	codeAndHash := &codeAndHash{code: code}
 	contractAddr = crypto.CreateAddress2(caller.Address(), common.BigToHash(salt), codeAndHash.Hash().Bytes())
-	return evm.create(caller, codeAndHash, gas, endowment, contractAddr)
+	return evm.create(caller, codeAndHash, gas, endowment, contractAddr, CREATE2)
 }
 
 // ChainConfig returns the environment's chain configuration

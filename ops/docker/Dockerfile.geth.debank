@@ -1,0 +1,18 @@
+FROM ubuntu:24.04
+
+
+# Make sure workdir is root path.
+WORKDIR /
+
+# Make sure required dependencies have been installed
+RUN apt-get clean && apt-get update && apt-get install -y jq curl ca-certificates wget
+
+# Using pre-built binaries before docker image building.
+COPY l2geth/build/bin/geth .
+
+# for geth.sh execution
+COPY l2geth/build/bin/geth /usr/local/bin/geth
+
+EXPOSE 8545 8546 8547
+COPY ./ops/scripts/geth.sh .
+ENTRYPOINT ["geth"]

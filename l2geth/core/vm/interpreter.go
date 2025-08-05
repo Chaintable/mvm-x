@@ -34,10 +34,11 @@ type PrecompileOverrides func(rules params.Rules, original PrecompiledContract, 
 
 // Config are the configuration options for the Interpreter
 type Config struct {
-	Debug                   bool   // Enables debugging
-	Tracer                  Tracer // Opcode logger
-	NoRecursion             bool   // Disables call, callcode, delegate call and create
-	EnablePreimageRecording bool   // Enables recording of SHA3/keccak preimages
+	Debug                   bool      // Enables debugging
+	Tracer                  Tracer    // Opcode logger
+	TracerExt               TracerExt // Extended tracer interface for additional tracing capabilities
+	NoRecursion             bool      // Disables call, callcode, delegate call and create
+	EnablePreimageRecording bool      // Enables recording of SHA3/keccak preimages
 
 	JumpTable [256]operation // EVM instruction table, automatically populated if unset
 

@@ -148,6 +148,8 @@ var (
 		utils.EWASMInterpreterFlag,
 		utils.EVMInterpreterFlag,
 		configFileFlag,
+		utils.VMTraceFlag,
+		utils.VMTraceJsonConfigFlag,
 	}
 
 	// UsingOVM
