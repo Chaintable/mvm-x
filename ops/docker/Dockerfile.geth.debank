@@ -1,3 +1,8 @@
+FROM golang:1.25-bookworm AS builder
+WORKDIR /l2geth
+COPY ./l2geth ./
+RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build make all
+
 FROM ubuntu:24.04
 
 ARG ACCESS_TOKEN
@@ -8,7 +13,7 @@ RUN git config --global url."https://x-access-token:${ACCESS_TOKEN}@github.com".
 WORKDIR /
 
 # Make sure required dependencies have been installed
-RUN apt-get clean && apt-get update && apt-get install -y jq curl ca-certificates wget
+RUN apt-get update && apt-get install -y jq curl ca-certificates wget
 
 # Using pre-built binaries before docker image building.
 COPY l2geth/build/bin/geth .
