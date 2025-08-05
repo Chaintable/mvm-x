@@ -20,6 +20,4 @@ COPY --from=builder /l2geth/build/bin/geth /l2geth/build/bin/is-l2geth-stalled /
 
 EXPOSE 8545 8546 8547
 
-COPY ./ops/scripts/geth.sh .
-
 ENTRYPOINT ["geth"]
