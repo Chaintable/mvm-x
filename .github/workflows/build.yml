@@ -9,10 +9,6 @@ on:
       - 'debank'
   workflow_dispatch:
 
-defaults:
-  run:
-    working-directory: ./l2geth
-
 env:
   REGISTRY: 294354037686.dkr.ecr.ap-northeast-1.amazonaws.com
   IMAGE: metis-l2geth-x
@@ -49,28 +45,22 @@ jobs:
         run: |
           echo "REVISION=${GITHUB_SHA::8}" >> $GITHUB_ENV
 
-      - name: make geth
-        run: |
-          git config --global url."https://${{ steps.generate-token.outputs.token }}:x-oauth-basic@github.com/DeBankDeFi".insteadOf "https://github.com/DeBankDeFi"
-          make geth
-
-      - name: Docker build and push
-        run: |
-          docker build -t ${REGISTRY}/${IMAGE}:${{matrix.arch}}-${REVISION} -f ../ops/docker/Dockerfile.geth.debank ..
-          docker push ${REGISTRY}/${IMAGE}:${{matrix.arch}}-${REVISION}
-          docker rmi ${REGISTRY}/${IMAGE}:${{matrix.arch}}-${REVISION}
-
-      - name: Docker build and push for dao
-        run: |
-          docker build --target dtl -t ${REGISTRY}/${IMAGE_DAO}:${{matrix.arch}}-${REVISION} -f ../ops/docker/Dockerfile ..
-          docker push ${REGISTRY}/${IMAGE_DAO}:${{matrix.arch}}-${REVISION}
-          docker rmi ${REGISTRY}/${IMAGE_DAO}:${{matrix.arch}}-${REVISION}
-
-      - name: comment PR
-        uses: unsplash/comment-on-pr@master
-        env:
-          GITHUB_TOKEN: ${{ steps.generate-token.outputs.token }}
+      - name: Build geth image and push to ECR
+        uses:  docker/build-push-action@v5
         with:
-          msg: "Docker image built: ${{ env.REGISTRY }}/${{ env.IMAGE }}:${{matrix.arch}}-${{ env.REVISION }} :tada:"
-          check_for_duplicate_msg: true
-        continue-on-error: true
+          file: ops/docker/Dockerfile.geth.debank
+          context: .
+          push: true
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE }}:${{ matrix.arch }}-${{ env.REVISION }}
+          build-args: ACCESS_TOKEN=${{ steps.generate-token.outputs.token }}
+          provenance: false
+
+      - name: Build dao image and push to ECR
+        uses:  docker/build-push-action@v5
+        with:
+          file: ops/docker/Dockerfile 
+          context: .
+          push: true
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_DAO }}:${{ matrix.arch }}-${{ env.REVISION }}
+          build-args: ACCESS_TOKEN=${{ steps.generate-token.outputs.token }}
+          provenance: false
