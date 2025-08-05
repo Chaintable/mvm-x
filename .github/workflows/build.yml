@@ -49,7 +49,7 @@ jobs:
         uses:  docker/build-push-action@v5
         with:
           file: ops/docker/Dockerfile.geth.debank
-          context: l2geth
+          context: .
           push: true
           tags: ${{ env.REGISTRY }}/${{ env.IMAGE }}:${{ matrix.arch }}-${{ env.REVISION }}
           build-args: ACCESS_TOKEN=${{ steps.generate-token.outputs.token }}
@@ -59,7 +59,7 @@ jobs:
         uses:  docker/build-push-action@v5
         with:
           file: ops/docker/Dockerfile ..
-          context: l2geth
+          context: .
           push: true
           tags: ${{ env.REGISTRY }}/${{ env.IMAGE_DAO }}:${{ matrix.arch }}-${{ env.REVISION }}
           build-args: ACCESS_TOKEN=${{ steps.generate-token.outputs.token }}
