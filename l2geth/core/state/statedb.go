@@ -816,6 +816,7 @@ func (s *StateDB) Commit(deleteEmptyObjects bool) (common.Hash, error) {
 	// Commit objects to the trie, measuring the elapsed time
 	for addr := range s.stateObjectsDirty {
 		if obj := s.stateObjects[addr]; !obj.deleted {
+			log.Info("obj", "obj.a", len(obj.commitStorage), "obj.d", len(obj.dirtyStorage), "obj.c", len(obj.pendingStorage))
 			// Write any contract code associated with the state object
 			if obj.code != nil && obj.dirtyCode {
 				s.db.TrieDB().InsertBlob(common.BytesToHash(obj.CodeHash()), obj.code)
