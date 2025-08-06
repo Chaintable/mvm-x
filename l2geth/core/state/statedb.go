@@ -830,9 +830,6 @@ func (s *StateDB) Commit(deleteEmptyObjects bool) (common.Hash, error) {
 			}
 			accounts[addrHash] = abuf
 			for key, val := range obj.commitStorage {
-				if val == obj.originStorage[key] {
-					continue
-				}
 				hash := crypto.Keccak256Hash(key[:])
 				if _, ok := storages[addrHash]; !ok {
 					storages[addrHash] = make(map[common.Hash][]byte)
@@ -840,6 +837,7 @@ func (s *StateDB) Commit(deleteEmptyObjects bool) (common.Hash, error) {
 				storages[addrHash][hash] = encode(val)
 			}
 			log.Info("obj", "obj.a", len(obj.commitStorage), "obj.d", len(obj.dirtyStorage), "obj.c", len(obj.pendingStorage), "storages", len(storages))
+			obj.commitStorage = make(Storage)
 			// Write any storage changes in the state object to its storage trie
 			if err := obj.CommitTrie(s.db); err != nil {
 				return common.Hash{}, err
