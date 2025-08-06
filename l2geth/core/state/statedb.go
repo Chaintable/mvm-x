@@ -828,7 +828,7 @@ func (s *StateDB) Commit(deleteEmptyObjects bool) (common.Hash, error) {
 				return common.Hash{}, fmt.Errorf("can't encode object at %s: %v", addr.Hex(), err)
 			}
 			accounts[addrHash] = abuf
-			for key, val := range obj.dirtyStorage {
+			for key, val := range obj.commitStorage {
 				if val == obj.originStorage[key] {
 					continue
 				}
