@@ -836,7 +836,6 @@ func (s *StateDB) Commit(deleteEmptyObjects bool) (common.Hash, error) {
 				}
 				storages[addrHash][hash] = encode(val)
 			}
-			log.Info("obj", "obj.a", len(obj.commitStorage), "obj.d", len(obj.dirtyStorage), "obj.c", len(obj.pendingStorage), "storages", len(storages))
 			obj.commitStorage = make(Storage)
 			// Write any storage changes in the state object to its storage trie
 			if err := obj.CommitTrie(s.db); err != nil {
