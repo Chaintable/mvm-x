@@ -963,7 +963,6 @@ var (
 	VMTraceJsonConfigFlag = &cli.StringFlag{
 		Name:  "vmtrace.jsonconfig",
 		Usage: "Tracer configuration (JSON)",
-		Value: "{}",
 	}
 )
 
@@ -1860,7 +1859,10 @@ func SetEthConfig(ctx *cli.Context, stack *node.Node, cfg *eth.Config) {
 	if ctx.IsSet(VMTraceFlag.Name) {
 		if name := ctx.String(VMTraceFlag.Name); name != "" {
 			cfg.VMTrace = name
-			cfg.VMTraceJsonConfig = ctx.String(VMTraceJsonConfigFlag.Name)
+			cfg.VMTraceJsonConfig = ctx.GlobalString(VMTraceJsonConfigFlag.Name)
+			if cfg.VMTraceJsonConfig == "" {
+				Fatalf("VM trace JSON config must be set when VM tracing is enabled")
+			}
 		}
 	}
 }
