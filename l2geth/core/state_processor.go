@@ -67,13 +67,15 @@ func (p *StateProcessor) Process(block *types.Block, statedb *state.StateDB, cfg
 	)
 	// Iterate over and process the individual transactions
 	var pipelineTracer *tracer.PipelineTracer
-	if p, ok := cfg.Tracer.(*tracer.PipelineTracer); !ok {
-		log.Crit("vmConfig.Tracer must be a pipeline.Tracer")
-	} else {
-		pipelineTracer = p
-		statedb.OnLog = p.OnLog
-		cfg.TracerExt = p
-		cfg.Debug = true
+	if cfg.Tracer != nil {
+		if p, ok := cfg.Tracer.(*tracer.PipelineTracer); !ok {
+			log.Crit("vmConfig.Tracer must be a pipeline.Tracer")
+		} else {
+			pipelineTracer = p
+			statedb.OnLog = p.OnLog
+			cfg.TracerExt = p
+			cfg.Debug = true
+		}
 	}
 	// Mutate the block and state according to any hard-fork specs
 	if p.config.DAOForkSupport && p.config.DAOForkBlock != nil && p.config.DAOForkBlock.Cmp(block.Number()) == 0 {
