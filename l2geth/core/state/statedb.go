@@ -120,7 +120,9 @@ type StateDB struct {
 	StorageUpdates time.Duration
 	StorageCommits time.Duration
 
-	OnLog func(log *types.Log)
+	OnLog      func(log *types.Log)
+	OnCommit   func(originRoot common.Hash, root common.Hash, destructs map[common.Hash]struct{}, accounts map[common.Hash][]byte, accountsOrigin map[common.Address][]byte, storages map[common.Hash]map[common.Hash][]byte, storagesOrigin map[common.Address]map[common.Hash][]byte, codes map[common.Hash][]byte)
+	originRoot common.Hash // The root hash of the state before the last commit
 }
 
 // Create a new state from a given trie.
@@ -139,6 +141,7 @@ func New(root common.Hash, db Database) (*StateDB, error) {
 		preimages:           make(map[common.Hash][]byte),
 		journal:             newJournal(),
 		accessList:          newAccessList(),
+		originRoot:          root,
 	}, nil
 }
 
@@ -796,21 +799,58 @@ func (s *StateDB) clearJournalAndRefund() {
 // Commit writes the state to the underlying in-memory trie database.
 func (s *StateDB) Commit(deleteEmptyObjects bool) (common.Hash, error) {
 	// Finalize any pending changes and merge everything into the tries
-	s.IntermediateRoot(deleteEmptyObjects)
+	root := s.IntermediateRoot(deleteEmptyObjects)
 
+	destructs := make(map[common.Hash]struct{})
+	accounts := make(map[common.Hash][]byte)
+	storages := make(map[common.Hash]map[common.Hash][]byte)
+	codes := make(map[common.Hash][]byte)
+
+	var encode = func(val common.Hash) []byte {
+		if val == (common.Hash{}) {
+			return nil
+		}
+		blob, _ := rlp.EncodeToBytes(common.TrimLeftZeroes(val[:]))
+		return blob
+	}
 	// Commit objects to the trie, measuring the elapsed time
 	for addr := range s.stateObjectsDirty {
 		if obj := s.stateObjects[addr]; !obj.deleted {
 			// Write any contract code associated with the state object
 			if obj.code != nil && obj.dirtyCode {
 				s.db.TrieDB().InsertBlob(common.BytesToHash(obj.CodeHash()), obj.code)
+				codes[common.BytesToHash(obj.CodeHash())] = obj.code
 				obj.dirtyCode = false
 			}
+			addrHash := crypto.Keccak256Hash(addr.Bytes())
+			abuf, err := rlp.EncodeToBytes(obj.data)
+			if err != nil {
+				return common.Hash{}, fmt.Errorf("can't encode object at %s: %v", addr.Hex(), err)
+			}
+			accounts[addrHash] = abuf
+			for key, val := range obj.pendingStorage {
+				if val == obj.originStorage[key] {
+					continue
+				}
+				hash := crypto.Keccak256Hash(key[:])
+				if _, ok := storages[addrHash]; !ok {
+					storages[addrHash] = make(map[common.Hash][]byte)
+				}
+				storages[addrHash][hash] = encode(val)
+			}
+
 			// Write any storage changes in the state object to its storage trie
 			if err := obj.CommitTrie(s.db); err != nil {
 				return common.Hash{}, err
 			}
+		} else {
+			// If the object was deleted, mark it for deletion
+			addrHash := crypto.Keccak256Hash(addr.Bytes())
+			destructs[addrHash] = struct{}{}
 		}
+	}
+	if s.OnCommit != nil {
+		s.OnCommit(s.originRoot, root, destructs, accounts, nil, storages, nil, codes)
 	}
 	if len(s.stateObjectsDirty) > 0 {
 		s.stateObjectsDirty = make(map[common.Address]struct{})
