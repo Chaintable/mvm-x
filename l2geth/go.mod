@@ -6,7 +6,7 @@ toolchain go1.23.9
 
 require (
 	github.com/Azure/azure-storage-blob-go v0.7.0
-	github.com/Chaintable/pipeline v0.0.53-libevm-v1.13.14-0.2.0.release-debank-3.0.20250805081242-9c3bf9bb7626
+	github.com/Chaintable/pipeline v0.0.55-metis-debank-1
 	github.com/VictoriaMetrics/fastcache v1.12.2
 	github.com/aristanetworks/goarista v0.0.0-20170210015632-ea17b1a17847
 	github.com/aws/aws-sdk-go v1.42.6
