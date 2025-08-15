@@ -824,7 +824,6 @@ func (s *StateDB) Commit(deleteEmptyObjects bool) (common.Hash, error) {
 				obj.dirtyCode = false
 			}
 			addrHash := crypto.Keccak256Hash(addr.Bytes())
-			log.Info("Committing state object", "address", addr.Hex(), "balance", obj.data.Balance.String())
 			abuf, err := rlp.EncodeToBytes(obj.data)
 			if err != nil {
 				return common.Hash{}, fmt.Errorf("can't encode object at %s: %v", addr.Hex(), err)
