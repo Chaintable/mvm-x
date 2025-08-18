@@ -93,6 +93,24 @@ func (exp *exp) publishGaugeFloat64(name string, metric metrics.GaugeFloat64) {
 	exp.getFloat(name).Set(metric.Value())
 }
 
+func (exp *exp) getInfo(name string) *expvar.String {
+	var v *expvar.String
+	exp.expvarLock.Lock()
+	p := expvar.Get(name)
+	if p != nil {
+		v = p.(*expvar.String)
+	} else {
+		v = new(expvar.String)
+		expvar.Publish(name, v)
+	}
+	exp.expvarLock.Unlock()
+	return v
+}
+
+func (exp *exp) publishGaugeInfo(name string, metric metrics.GaugeInfoSnapshot) {
+	exp.getInfo(name).Set(metric.Value().String())
+}
+
 func (exp *exp) publishHistogram(name string, metric metrics.Histogram) {
 	h := metric.Snapshot()
 	ps := h.Percentiles([]float64{0.5, 0.75, 0.95, 0.99, 0.999})
@@ -156,6 +174,8 @@ func (exp *exp) syncToExpvar() {
 			exp.publishGauge(name, i)
 		case metrics.GaugeFloat64:
 			exp.publishGaugeFloat64(name, i)
+		case *metrics.GaugeInfo:
+			exp.publishGaugeInfo(name, i.Snapshot())
 		case metrics.Histogram:
 			exp.publishHistogram(name, i)
 		case metrics.Meter:
