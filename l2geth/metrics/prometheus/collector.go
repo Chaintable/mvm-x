@@ -23,6 +23,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/MetisProtocol/mvm/l2geth/log"
 	"github.com/MetisProtocol/mvm/l2geth/metrics"
 )
 
@@ -108,6 +109,7 @@ func (c *collector) writeGaugeInfo(name string, value metrics.GaugeInfoValue) {
 	}
 	sort.Strings(kvs)
 	c.buff.WriteString(fmt.Sprintf("{%v} 1\n\n", strings.Join(kvs, ", ")))
+	log.Info("Prometheus GaugeInfo", "name", name, "value", value)
 }
 
 func (c *collector) writeGaugeCounter(name string, value interface{}) {
