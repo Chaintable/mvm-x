@@ -198,8 +198,10 @@ func (r *StandardRegistry) register(name string, i interface{}) error {
 		return DuplicateMetric(name)
 	}
 	switch i.(type) {
-	case Counter, Gauge, GaugeFloat64, Healthcheck, Histogram, Meter, Timer, ResettingTimer, GaugeInfo:
+	case Counter, Gauge, GaugeFloat64, Healthcheck, Histogram, Meter, Timer, ResettingTimer, *GaugeInfo:
 		r.metrics[name] = i
+	default:
+		panic(fmt.Sprintf("unknown metric type %T for %s", i, name))
 	}
 	return nil
 }
