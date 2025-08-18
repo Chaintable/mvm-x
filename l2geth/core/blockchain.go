@@ -78,6 +78,7 @@ var (
 
 	blockPrefetchExecuteTimer   = metrics.NewRegisteredTimer("chain/prefetch/executes", nil)
 	blockPrefetchInterruptMeter = metrics.NewRegisteredMeter("chain/prefetch/interrupts", nil)
+	nodeInfo                    = metrics.NewRegisteredGaugeInfo("pipeline/node_info", nil)
 
 	errInsertionInterrupted = errors.New("insertion is interrupted")
 )
@@ -312,6 +313,11 @@ func NewBlockChain(db ethdb.Database, cacheConfig *CacheConfig, chainConfig *par
 	}
 
 	if bc.hooks != nil && bc.hooks.OnBlockchainInit != nil {
+		log.Info("Initializing node info gauge", "chain_id", chainConfig.ChainID.String(), "role", "writer")
+		nodeInfo.Update(map[string]string{
+			"chain_id": chainConfig.ChainID.String(),
+			"role":     "writer",
+		})
 		bc.hooks.OnBlockchainInit(chainConfig)
 	}
 	if bc.hooks != nil && bc.hooks.OnGenesisBlock != nil {

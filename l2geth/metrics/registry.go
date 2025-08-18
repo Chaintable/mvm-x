@@ -124,6 +124,8 @@ func (r *StandardRegistry) GetAll() map[string]map[string]interface{} {
 			values["value"] = metric.Value()
 		case GaugeFloat64:
 			values["value"] = metric.Value()
+		case *GaugeInfo:
+			values["value"] = metric.Snapshot().Value()
 		case Healthcheck:
 			values["error"] = nil
 			metric.Check()
@@ -196,8 +198,10 @@ func (r *StandardRegistry) register(name string, i interface{}) error {
 		return DuplicateMetric(name)
 	}
 	switch i.(type) {
-	case Counter, Gauge, GaugeFloat64, Healthcheck, Histogram, Meter, Timer, ResettingTimer:
+	case Counter, Gauge, GaugeFloat64, Healthcheck, Histogram, Meter, Timer, ResettingTimer, *GaugeInfo:
 		r.metrics[name] = i
+	default:
+		panic(fmt.Sprintf("unknown metric type %T for %s", i, name))
 	}
 	return nil
 }
