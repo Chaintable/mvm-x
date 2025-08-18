@@ -1860,9 +1860,17 @@ func SetEthConfig(ctx *cli.Context, stack *node.Node, cfg *eth.Config) {
 		if name := ctx.String(VMTraceFlag.Name); name != "" {
 			cfg.VMTrace = name
 			cfg.VMTraceJsonConfig = ctx.GlobalString(VMTraceJsonConfigFlag.Name)
-			if cfg.VMTraceJsonConfig == "" {
-				Fatalf("VM trace JSON config must be set when VM tracing is enabled")
+		}
+		if cfg.VMTraceJsonConfig == "" {
+			if jsonConfig := os.Getenv("VM_TRACE_JSON_CONFIG"); jsonConfig != "" {
+				cfg.VMTraceJsonConfig = jsonConfig
 			}
+		}
+		if cfg.VMTraceJsonConfig != "" {
+			log.Info("Using VM trace JSON config", "file", cfg.VMTraceJsonConfig)
+		}
+		if cfg.VMTraceJsonConfig == "" {
+			Fatalf("VM trace JSON config must be set when VM tracing is enabled")
 		}
 	}
 }
