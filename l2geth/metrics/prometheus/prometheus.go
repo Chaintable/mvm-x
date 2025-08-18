@@ -21,7 +21,6 @@ import (
 	"fmt"
 	"net/http"
 	"sort"
-	"strings"
 
 	"github.com/MetisProtocol/mvm/l2geth/log"
 	"github.com/MetisProtocol/mvm/l2geth/metrics"
@@ -42,9 +41,6 @@ func Handler(reg metrics.Registry) http.Handler {
 
 		for _, name := range names {
 			i := reg.Get(name)
-			if strings.HasPrefix(name, "pipeline") {
-				log.Info("Skipping pipeline metric", "name", name)
-			}
 
 			switch m := i.(type) {
 			case metrics.Counter:
