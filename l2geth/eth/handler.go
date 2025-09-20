@@ -148,11 +148,11 @@ func NewProtocolManager(config *params.ChainConfig, checkpoint *params.TrustedCh
 		// * the last fast sync is not finished while user specifies a full sync this
 		//   time. But we don't have any recent state for full sync.
 		// In these cases however it's safe to reenable fast sync.
-		fullBlock, fastBlock := blockchain.CurrentBlock(), blockchain.CurrentFastBlock()
-		if fullBlock.NumberU64() == 0 && fastBlock.NumberU64() > 0 {
-			manager.fastSync = uint32(1)
-			log.Warn("Switch sync mode from full sync to fast sync")
-		}
+		// fullBlock, fastBlock := blockchain.CurrentBlock(), blockchain.CurrentFastBlock()
+		// if fullBlock.NumberU64() == 0 && fastBlock.NumberU64() > 0 {
+		// 	manager.fastSync = uint32(1)
+		// 	log.Warn("Switch sync mode from full sync to fast sync")
+		// }
 	} else {
 		if blockchain.CurrentBlock().NumberU64() > 0 {
 			// Print warning log if database is not empty to run fast sync.
