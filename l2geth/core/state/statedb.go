@@ -119,6 +119,9 @@ type StateDB struct {
 	StorageHashes  time.Duration
 	StorageUpdates time.Duration
 	StorageCommits time.Duration
+
+	OnLog      func(log *types.Log)
+	originRoot common.Hash // The root hash of the state before the last commit
 }
 
 // Create a new state from a given trie.
@@ -137,6 +140,7 @@ func New(root common.Hash, db Database) (*StateDB, error) {
 		preimages:           make(map[common.Hash][]byte),
 		journal:             newJournal(),
 		accessList:          newAccessList(),
+		originRoot:          root,
 	}, nil
 }
 
@@ -180,6 +184,9 @@ func (s *StateDB) AddLog(log *types.Log) {
 	log.BlockHash = s.bhash
 	log.TxIndex = uint(s.txIndex)
 	log.Index = s.logSize
+	if s.OnLog != nil {
+		s.OnLog(log)
+	}
 	s.logs[s.thash] = append(s.logs[s.thash], log)
 	s.logSize++
 }
@@ -883,6 +890,55 @@ func (s *StateDB) AddSlotToAccessList(addr common.Address, slot common.Hash) {
 // AddressInAccessList returns true if the given address is in the access list.
 func (s *StateDB) AddressInAccessList(addr common.Address) bool {
 	return s.accessList.ContainsAddress(addr)
+}
+
+// StateDiff returns the state diff for RPC tracing without committing.
+// Returns: root hash, destructs, accounts, storages, codes, error
+func (s *StateDB) StateDiff(deleteEmptyObjects bool) (common.Hash, map[common.Hash]struct{}, map[common.Hash][]byte, map[common.Hash]map[common.Hash][]byte, map[common.Hash][]byte, error) {
+	// Finalize any pending changes and merge everything into the tries
+	root := s.IntermediateRoot(deleteEmptyObjects)
+
+	destructs := make(map[common.Hash]struct{})
+	accounts := make(map[common.Hash][]byte)
+	storages := make(map[common.Hash]map[common.Hash][]byte)
+	codes := make(map[common.Hash][]byte)
+
+	var encode = func(val common.Hash) []byte {
+		if val == (common.Hash{}) {
+			return nil
+		}
+		blob, _ := rlp.EncodeToBytes(common.TrimLeftZeroes(val[:]))
+		return blob
+	}
+
+	// Collect state changes without committing
+	for addr := range s.stateObjectsDirty {
+		if obj := s.stateObjects[addr]; !obj.deleted {
+			// Collect contract code
+			if obj.code != nil && obj.dirtyCode {
+				codes[common.BytesToHash(obj.CodeHash())] = obj.code
+			}
+			addrHash := crypto.Keccak256Hash(addr.Bytes())
+			abuf, err := rlp.EncodeToBytes(obj.data)
+			if err != nil {
+				return common.Hash{}, nil, nil, nil, nil, fmt.Errorf("can't encode object at %s: %v", addr.Hex(), err)
+			}
+			accounts[addrHash] = abuf
+			for key, val := range obj.commitStorage {
+				hash := crypto.Keccak256Hash(key[:])
+				if _, ok := storages[addrHash]; !ok {
+					storages[addrHash] = make(map[common.Hash][]byte)
+				}
+				storages[addrHash][hash] = encode(val)
+			}
+		} else {
+			// If the object was deleted, mark it for deletion
+			addrHash := crypto.Keccak256Hash(addr.Bytes())
+			destructs[addrHash] = struct{}{}
+		}
+	}
+
+	return root, destructs, accounts, storages, codes, nil
 }
 
 // SlotInAccessList returns true if the given (address, slot)-tuple is in the access list.

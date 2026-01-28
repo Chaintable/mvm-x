@@ -1,0 +1,23 @@
+FROM golang:1.24-bookworm AS builder
+
+WORKDIR /l2geth
+
+COPY l2geth ./
+
+ARG ACCESS_TOKEN
+
+RUN git config --global url."https://x-access-token:${ACCESS_TOKEN}@github.com".insteadOf "https://github.com"
+
+RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build make all
+
+FROM ubuntu:24.04
+
+WORKDIR /
+
+RUN apt-get update && apt-get install -y jq curl ca-certificates wget
+
+COPY --from=builder /l2geth/build/bin/geth /l2geth/build/bin/is-l2geth-stalled /usr/local/bin/
+
+EXPOSE 8545 8546 8547
+
+ENTRYPOINT ["geth"]

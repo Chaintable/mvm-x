@@ -384,6 +384,11 @@ func (s *Ethereum) APIs() []rpc.API {
 			Version:   "1.0",
 			Service:   s.netRPCService,
 			Public:    true,
+		}, {
+			Namespace: "trace",
+			Version:   "1.0",
+			Service:   NewDebankAPI(s),
+			Public:    true,
 		},
 	}...)
 }
