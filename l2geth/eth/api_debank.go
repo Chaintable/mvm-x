@@ -5,13 +5,16 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/big"
 	"net/http"
 	"os"
+	"sort"
 	"strings"
 
 	ptracer "github.com/Chaintable/pipeline/tracer"
 	ptypes "github.com/Chaintable/pipeline/types"
 	"github.com/Chaintable/pipeline/util"
+	"github.com/MetisProtocol/mvm/l2geth/common"
 	"github.com/MetisProtocol/mvm/l2geth/common/hexutil"
 	"github.com/MetisProtocol/mvm/l2geth/consensus/misc"
 	"github.com/MetisProtocol/mvm/l2geth/core"
@@ -91,11 +94,167 @@ func (api *DebankAPI) DebankBlock(ctx context.Context, blockNrOrHash rpc.BlockNu
 			ErrorTraces:      make([]ptypes.Trace, 0),
 			StorageContracts: make([]string, 0),
 		}
-		for addr, account := range genesis {
+
+		// 构造 genesis tx 和 trace
+		zeroAddr := "0x0000000000000000000000000000000000000000"
+		txIdx := int64(0)
+
+		// 对地址排序，确保遍历顺序确定性
+		sortedAddrs := make([]common.Address, 0, len(genesis))
+		for addr := range genesis {
+			sortedAddrs = append(sortedAddrs, addr)
+		}
+		sort.Slice(sortedAddrs, func(i, j int) bool {
+			return sortedAddrs[i].Hex() < sortedAddrs[j].Hex()
+		})
+
+		for _, addr := range sortedAddrs {
+			account := genesis[addr]
+			addrLower := strings.ToLower(addr.Hex())
+
+			// 处理有 Storage 的账户
 			if len(account.Storage) > 0 {
-				blockFile.StorageContracts = append(blockFile.StorageContracts, strings.ToLower(addr.Hex()))
+				blockFile.StorageContracts = append(blockFile.StorageContracts, addrLower)
+			}
+
+			// 处理有 balance 的账户 - 构造转账 tx 和 call trace
+			if account.Balance != nil && account.Balance.Sign() > 0 {
+				// tx id: 0xgenesis01 + 13个0 + 地址(42字符) = 66字符
+				txID := fmt.Sprintf("0xgenesis01%013d%s", 0, addrLower)
+
+				tx := ptypes.Transaction{
+					ID:               txID,
+					From:             zeroAddr,
+					To:               addrLower,
+					Gas:              big.NewInt(0),
+					GasPrice:         big.NewInt(0),
+					GasUsed:          big.NewInt(0),
+					Status:           true,
+					GasFeeCap:        big.NewInt(0),
+					GasTipCap:        big.NewInt(0),
+					Input:            []byte{},
+					Nonce:            big.NewInt(0),
+					TransactionIndex: txIdx,
+					Value:            (*hexutil.Big)(account.Balance),
+				}
+				blockFile.Txs = append(blockFile.Txs, tx)
+
+				// trace id = hash(tx_id, parent_trace_id, pos_in_parent_trace)
+				traceID := util.ToHash([]string{txID, "", "0"})
+				trace := ptypes.Trace{
+					ID:                traceID,
+					From:              zeroAddr,
+					Gas:               big.NewInt(0),
+					Input:             []byte{},
+					To:                addrLower,
+					Value:             (*hexutil.Big)(account.Balance),
+					GasUsed:           big.NewInt(0),
+					Output:            []byte{},
+					CallCreateType:    "call",
+					CallType:          "call",
+					TxID:              txID,
+					ParentTraceID:     "",
+					PosInParentTrace:  0,
+					SelfStorageChange: false,
+					StorageChange:     false,
+					Subtraces:         0,
+					TraceAddress:      []int64{},
+				}
+				blockFile.Traces = append(blockFile.Traces, trace)
+				txIdx++
+			}
+
+			// 处理有 code 的账户 - 构造 create tx 和 create trace
+			if len(account.Code) > 0 {
+				// tx id: 0xgenesis02 + 13个0 + 地址(42字符) = 66字符
+				txID := fmt.Sprintf("0xgenesis02%013d%s", 0, addrLower)
+
+				tx := ptypes.Transaction{
+					ID:               txID,
+					From:             zeroAddr,
+					To:               addrLower,
+					Gas:              big.NewInt(0),
+					GasPrice:         big.NewInt(0),
+					GasUsed:          big.NewInt(0),
+					Status:           true,
+					GasFeeCap:        big.NewInt(0),
+					GasTipCap:        big.NewInt(0),
+					Input:            account.Code,
+					Nonce:            big.NewInt(0),
+					TransactionIndex: txIdx,
+					Value:            (*hexutil.Big)(big.NewInt(0)),
+				}
+				blockFile.Txs = append(blockFile.Txs, tx)
+
+				// trace id = hash(tx_id, parent_trace_id, pos_in_parent_trace)
+				traceID := util.ToHash([]string{txID, "", "0"})
+				trace := ptypes.Trace{
+					ID:                traceID,
+					From:              zeroAddr,
+					Gas:               big.NewInt(0),
+					Input:             account.Code,
+					To:                addrLower,
+					Value:             (*hexutil.Big)(big.NewInt(0)),
+					GasUsed:           big.NewInt(0),
+					Output:            account.Code, // output 直接使用 input (code)
+					CallCreateType:    "create",
+					CallType:          "",
+					TxID:              txID,
+					ParentTraceID:     "",
+					PosInParentTrace:  0,
+					SelfStorageChange: false,
+					StorageChange:     false,
+					Subtraces:         0,
+					TraceAddress:      []int64{},
+				}
+				blockFile.Traces = append(blockFile.Traces, trace)
+				txIdx++
 			}
 		}
+
+		// 添加原生代币合约创建 tx 和 trace (E地址)
+		nativeTokenAddr := "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+		nativeTokenTxID := fmt.Sprintf("0xgenesis03%013d%s", 0, nativeTokenAddr)
+
+		nativeTokenTx := ptypes.Transaction{
+			ID:               nativeTokenTxID,
+			From:             zeroAddr,
+			To:               nativeTokenAddr,
+			Gas:              big.NewInt(0),
+			GasPrice:         big.NewInt(0),
+			GasUsed:          big.NewInt(0),
+			Status:           true,
+			GasFeeCap:        big.NewInt(0),
+			GasTipCap:        big.NewInt(0),
+			Input:            []byte{},
+			Nonce:            big.NewInt(0),
+			TransactionIndex: txIdx,
+			Value:            (*hexutil.Big)(big.NewInt(0)),
+		}
+		blockFile.Txs = append(blockFile.Txs, nativeTokenTx)
+
+		nativeTokenTraceID := util.ToHash([]string{nativeTokenTxID, "", "0"})
+		nativeTokenTrace := ptypes.Trace{
+			ID:                nativeTokenTraceID,
+			From:              zeroAddr,
+			Gas:               big.NewInt(0),
+			Input:             []byte{},
+			To:                nativeTokenAddr,
+			Value:             (*hexutil.Big)(big.NewInt(0)),
+			GasUsed:           big.NewInt(0),
+			Output:            []byte{},
+			CallCreateType:    "create",
+			CallType:          "",
+			TxID:              nativeTokenTxID,
+			ParentTraceID:     "",
+			PosInParentTrace:  0,
+			SelfStorageChange: false,
+			StorageChange:     false,
+			Subtraces:         0,
+			TraceAddress:      []int64{},
+		}
+		blockFile.Traces = append(blockFile.Traces, nativeTokenTrace)
+
 		var stateDiffBytes []byte
 		if blockDiff != nil {
 			stateDiffBytes, err = util.EncodeToRlp(blockDiff)
