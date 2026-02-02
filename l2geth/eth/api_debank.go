@@ -16,14 +16,9 @@ import (
 	"github.com/Chaintable/pipeline/util"
 	"github.com/MetisProtocol/mvm/l2geth/common"
 	"github.com/MetisProtocol/mvm/l2geth/common/hexutil"
-	"github.com/MetisProtocol/mvm/l2geth/consensus/misc"
 	"github.com/MetisProtocol/mvm/l2geth/core"
-	"github.com/MetisProtocol/mvm/l2geth/core/types"
 	"github.com/MetisProtocol/mvm/l2geth/core/vm"
-	"github.com/MetisProtocol/mvm/l2geth/crypto"
 	"github.com/MetisProtocol/mvm/l2geth/log"
-	"github.com/MetisProtocol/mvm/l2geth/rollup/fees"
-	"github.com/MetisProtocol/mvm/l2geth/rollup/rcfg"
 	"github.com/MetisProtocol/mvm/l2geth/rpc"
 )
 
@@ -291,98 +286,16 @@ func (api *DebankAPI) DebankBlock(ctx context.Context, blockNrOrHash rpc.BlockNu
 		TracerExt: &rpcTracer,
 	}
 
+	statedb.OnLog = rpcTracer.OnLog
+
 	rpcTracer.OnBlockStart(block)
 
 	chainConfig := api.eth.blockchain.Config()
 
-	// Mutate the block and state according to any hard-fork specs
-	if chainConfig.DAOForkSupport && chainConfig.DAOForkBlock != nil && chainConfig.DAOForkBlock.Cmp(block.Number()) == 0 {
-		misc.ApplyDAOHardFork(statedb)
+	_, _, _, err = api.eth.BlockChain().Processor().Process(block, statedb, vmConfig)
+	if err != nil {
+		return nil, fmt.Errorf("failed to process block: %w", err)
 	}
-
-	var (
-		txs     = block.Transactions()
-		header  = block.Header()
-		signer  = types.MakeSigner(chainConfig, block.Number())
-		gp      = new(core.GasPool).AddGas(block.GasLimit())
-		usedGas = new(uint64)
-	)
-
-	// Set hooks for log tracing
-	statedb.OnLog = rpcTracer.OnLog
-
-	for i, tx := range txs {
-		statedb.Prepare(tx.Hash(), block.Hash(), i)
-
-		msg, err := tx.AsMessage(signer)
-		if err != nil {
-			return nil, fmt.Errorf("could not apply tx %d [%v]: %w", i, tx.Hash().Hex(), err)
-		}
-
-		rpcTracer.OnTxStart(tx, msg.From())
-
-		// Create EVM context
-		evmCtx := core.NewEVMContext(msg, header, api.eth.blockchain, nil)
-		vmenv := vm.NewEVM(evmCtx, statedb, chainConfig, vmConfig)
-
-		// Compute the fee related information that is to be included
-		// on the receipt. This must happen before the state transition
-		// to ensure that the correct information is used.
-		l1Fee, l1GasPrice, l1GasUsed, scalar, err := fees.DeriveL1GasInfo(msg, statedb)
-		if err != nil {
-			return nil, fmt.Errorf("could not derive L1 gas info for tx %d [%v]: %w", i, tx.Hash().Hex(), err)
-		}
-
-		// Apply the transaction
-		_, gas, failed, err := core.ApplyMessageWithBlockNumber(vmenv, msg, gp, header.Number.Uint64())
-		if err != nil {
-			return nil, fmt.Errorf("could not apply tx %d [%v]: %w", i, tx.Hash().Hex(), err)
-		}
-
-		// Update the state with pending changes
-		var root []byte
-		if chainConfig.IsByzantium(header.Number) {
-			statedb.Finalise(true)
-		} else {
-			root = statedb.IntermediateRoot(chainConfig.IsEIP158(header.Number)).Bytes()
-		}
-		*usedGas += gas
-
-		// Create receipt
-		receipt := types.NewReceipt(root, failed, *usedGas)
-		receipt.L1GasPrice = l1GasPrice
-		receipt.L1GasUsed = l1GasUsed
-		receipt.L1Fee = l1Fee
-		receipt.FeeScalar = scalar
-		receipt.TxHash = tx.Hash()
-		receipt.GasUsed = gas
-		// if the transaction created a contract, store the creation address in the receipt.
-		if msg.To() == nil {
-			if rcfg.UsingOVM {
-				sysAddress := rcfg.SystemAddressFor(chainConfig.ChainID, vmenv.Context.Origin)
-				// If nonce is zero, and the deployer is a system address deployer,
-				// set the provided system contract address.
-				if sysAddress != rcfg.ZeroSystemAddress && tx.Nonce() == 0 && tx.To() == nil {
-					receipt.ContractAddress = sysAddress
-				} else {
-					receipt.ContractAddress = crypto.CreateAddress(vmenv.Context.Origin, tx.Nonce())
-				}
-			} else {
-				receipt.ContractAddress = crypto.CreateAddress(vmenv.Context.Origin, tx.Nonce())
-			}
-		}
-		receipt.Logs = statedb.GetLogs(tx.Hash())
-		receipt.Bloom = types.CreateBloom(types.Receipts{receipt})
-		receipt.BlockHash = statedb.BlockHash()
-		receipt.BlockNumber = header.Number
-		receipt.TransactionIndex = uint(statedb.TxIndex())
-
-		rpcTracer.OnTxEnd(receipt, nil)
-	}
-
-	// Finalize the block, applying any consensus engine specific extras (e.g. block rewards)
-	api.eth.engine.Finalize(api.eth.blockchain, header, statedb, block.Transactions(), block.Uncles())
-
 	root, destructs, accounts, storages, codes, err := statedb.StateDiff(chainConfig.IsEIP158(block.Number()))
 	if err != nil {
 		return nil, fmt.Errorf("could not get state diff: %w", err)

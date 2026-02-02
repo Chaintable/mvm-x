@@ -111,6 +111,8 @@ type Tracer interface {
 type TracerExt interface {
 	CaptureEnter(typ OpCode, from common.Address, to common.Address, input []byte, gas uint64, value *big.Int)
 	CaptureExit(output []byte, gasUsed uint64, err error)
+	OnTxStart(tx *types.Transaction, from common.Address)
+	OnTxEnd(receipt *types.Receipt, err error)
 }
 
 // StructLogger is an EVM state logger and implements Tracer.

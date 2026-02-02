@@ -69,8 +69,18 @@ func (p *StateProcessor) Process(block *types.Block, statedb *state.StateDB, cfg
 	}
 	// Iterate over and process the individual transactions
 	for i, tx := range block.Transactions() {
+		if cfg.TracerExt != nil {
+			msg, err := tx.AsMessage(types.MakeSigner(p.config, header.Number))
+			if err != nil {
+				return nil, nil, 0, err
+			}
+			cfg.TracerExt.OnTxStart(tx, msg.From())
+		}
 		statedb.Prepare(tx.Hash(), block.Hash(), i)
 		receipt, err := ApplyTransaction(p.config, p.bc, nil, gp, statedb, header, tx, usedGas, cfg)
+		if cfg.TracerExt != nil {
+			cfg.TracerExt.OnTxEnd(receipt, err)
+		}
 		if err != nil {
 			return nil, nil, 0, err
 		}
