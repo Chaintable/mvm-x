@@ -24,7 +24,6 @@ import (
 	"github.com/MetisProtocol/mvm/l2geth/core/types"
 	"github.com/MetisProtocol/mvm/l2geth/core/vm"
 	"github.com/MetisProtocol/mvm/l2geth/crypto"
-	"github.com/MetisProtocol/mvm/l2geth/log"
 	"github.com/MetisProtocol/mvm/l2geth/params"
 	"github.com/MetisProtocol/mvm/l2geth/rollup/fees"
 	"github.com/MetisProtocol/mvm/l2geth/rollup/rcfg"
@@ -70,7 +69,6 @@ func (p *StateProcessor) Process(block *types.Block, statedb *state.StateDB, cfg
 	}
 	// Iterate over and process the individual transactions
 	for i, tx := range block.Transactions() {
-		log.Info("Processing transaction", "chainid", tx.ChainId())
 		if cfg.TracerExt != nil {
 			msg, err := tx.AsMessage(types.MakeSigner(p.config, header.Number))
 			if err != nil {
