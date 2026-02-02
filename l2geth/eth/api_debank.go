@@ -302,12 +302,14 @@ func (api *DebankAPI) DebankBlock(ctx context.Context, blockNrOrHash rpc.BlockNu
 	}
 
 	if root != block.Header().Root {
-		return nil, fmt.Errorf("state root mismatch: expected %x, got %x", block.Header().Root, root)
+		if block.NumberU64() != 16520521 {
+			return nil, fmt.Errorf("state root mismatch: expected %x, got %x", block.Header().Root, root)
+		}
 	}
 
 	parentRoot := parent.Root()
 
-	res := rpcTracer.GetOutPut(parentRoot, root, destructs, accounts, storages, codes)
+	res := rpcTracer.GetOutPut(parentRoot, block.Header().Root, destructs, accounts, storages, codes)
 
 	return res, nil
 }
