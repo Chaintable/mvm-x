@@ -407,33 +407,6 @@ func makeStructDecoder(typ reflect.Type) (decoder, error) {
 	return dec, nil
 }
 
-func makeStructTxMetaDecoder(typ reflect.Type) (decoder, error) {
-	fields, err := structFields(typ)
-	if err != nil {
-		return nil, err
-	}
-	for _, f := range fields {
-		if f.info.decoderErr != nil {
-			return nil, structFieldError{typ, f.index, f.info.decoderErr}
-		}
-	}
-	dec := func(s *Stream, val reflect.Value) (err error) {
-		if _, err := s.List(); err != nil {
-			return wrapStreamError(err, typ)
-		}
-		for _, f := range fields {
-			err := f.info.decoder(s, val.Field(f.index))
-			if err == EOL {
-				return wrapStreamError(s.ListEnd(), typ)
-			} else if err != nil {
-				return addErrorContext(err, "."+typ.Field(f.index).Name)
-			}
-		}
-		return wrapStreamError(s.ListEnd(), typ)
-	}
-	return dec, nil
-}
-
 // makePtrDecoder creates a decoder that decodes into the pointer's element type.
 func makePtrDecoder(typ reflect.Type, tag tags) (decoder, error) {
 	etype := typ.Elem()
@@ -808,12 +781,12 @@ func (s *Stream) DecodeTxMeta(val interface{}) error {
 	if rval.IsNil() {
 		return errDecodeIntoNil
 	}
-	decoder, err := makeStructTxMetaDecoder(rtyp.Elem())
-	if err != nil {
-		return err
+	info := cachedTypeInfo(rtyp.Elem(), tags{})
+	if info.decoderErr != nil {
+		return info.decoderErr
 	}
 
-	err = decoder(s, rval.Elem())
+	err := info.decoder(s, rval.Elem())
 	if decErr, ok := err.(*decodeError); ok && len(decErr.ctx) > 0 {
 		// add decode target type to error so context has more meaning
 		decErr.ctx = append(decErr.ctx, fmt.Sprint("(", rtyp.Elem(), ")"))
