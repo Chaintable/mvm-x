@@ -312,15 +312,18 @@ func (evm *EVM) CallCode(caller ContractRef, addr common.Address, input []byte, 
 
 	if evm.vmConfig.Debug && evm.vmConfig.TracerExt != nil {
 		evm.vmConfig.TracerExt.CaptureEnter(CALLCODE, caller.Address(), addr, input, gas, value)
-		defer func(startGas uint64) {
-			evm.vmConfig.TracerExt.CaptureExit(ret, startGas-gas, err)
-		}(gas)
 	}
 
 	// Initialise a new contract and set the code that is to be used by the EVM.
 	// The contract is a scoped environment for this execution context only.
 	contract := NewContract(caller, to, value, gas)
 	contract.SetCallCode(&addr, evm.StateDB.GetCodeHash(addr), evm.StateDB.GetCode(addr))
+
+	if evm.vmConfig.Debug && evm.vmConfig.TracerExt != nil {
+		defer func() {
+			evm.vmConfig.TracerExt.CaptureExit(ret, gas-contract.Gas, err)
+		}()
+	}
 
 	ret, err = run(evm, contract, input, false)
 	if err != nil {
@@ -358,14 +361,17 @@ func (evm *EVM) DelegateCall(caller ContractRef, addr common.Address, input []by
 		parent := caller.(*Contract)
 		// DELEGATECALL inherits value from parent call
 		evm.vmConfig.TracerExt.CaptureEnter(DELEGATECALL, caller.Address(), addr, input, gas, parent.value)
-		defer func(startGas uint64) {
-			evm.vmConfig.TracerExt.CaptureExit(ret, startGas-gas, err)
-		}(gas)
 	}
 
 	// Initialise a new contract and make initialise the delegate values
 	contract := NewContract(caller, to, nil, gas).AsDelegate()
 	contract.SetCallCode(&addr, evm.StateDB.GetCodeHash(addr), evm.StateDB.GetCode(addr))
+
+	if evm.vmConfig.Debug && evm.vmConfig.TracerExt != nil {
+		defer func() {
+			evm.vmConfig.TracerExt.CaptureExit(ret, gas-contract.Gas, err)
+		}()
+	}
 
 	ret, err = run(evm, contract, input, false)
 	if err != nil {
@@ -408,9 +414,9 @@ func (evm *EVM) StaticCall(caller ContractRef, addr common.Address, input []byte
 	// Invoke tracer hooks that signal entering/exiting a call frame
 	if evm.vmConfig.Debug && evm.vmConfig.TracerExt != nil {
 		evm.vmConfig.TracerExt.CaptureEnter(STATICCALL, caller.Address(), addr, input, gas, nil)
-		defer func(startGas uint64) {
-			evm.vmConfig.TracerExt.CaptureExit(ret, startGas-gas, err)
-		}(gas)
+		defer func() {
+			evm.vmConfig.TracerExt.CaptureExit(ret, gas-contract.Gas, err)
+		}()
 	}
 
 	// When an error was returned by the EVM or when setting the creation code
