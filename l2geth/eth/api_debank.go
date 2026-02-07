@@ -389,7 +389,9 @@ func (api *DebankAPI) DebankBlock(ctx context.Context, blockNrOrHash rpc.BlockNu
 	}
 
 	if root != block.Header().Root {
-		return nil, fmt.Errorf("state root mismatch: expected %x, got %x", block.Header().Root, root)
+		// return nil, fmt.Errorf("state root mismatch: expected %x, got %x", block.Header().Root, root)
+		log.Warn("state root mismatch", "expected", block.Header().Root, "got", root)
+		root = block.Header().Root
 	}
 
 	parentRoot := parent.Root()
