@@ -36,6 +36,14 @@ import (
 // deployed contract addresses (relevant after the account abstraction).
 var emptyCodeHash = crypto.Keccak256Hash(nil)
 
+// copyBigIntForTrace detaches tracer payloads from EVM internals (e.g. intPool-backed stack values).
+func copyBigIntForTrace(v *big.Int) *big.Int {
+	if v == nil {
+		return nil
+	}
+	return new(big.Int).Set(v)
+}
+
 type (
 	// CanTransferFunc is the signature of a transfer guard function
 	CanTransferFunc func(StateDB, common.Address, *big.Int) bool
@@ -236,11 +244,11 @@ func (evm *EVM) Call(caller ContractRef, addr common.Address, input []byte, gas 
 		if precompiles[addr] == nil && evm.chainRules.IsEIP158 && value.Sign() == 0 {
 			// Calling a non existing account, don't do anything, but ping the tracer
 			if evm.vmConfig.Debug && evm.depth == 0 {
-				evm.vmConfig.Tracer.CaptureStart(caller.Address(), addr, false, input, gas, value)
+				evm.vmConfig.Tracer.CaptureStart(caller.Address(), addr, false, input, gas, copyBigIntForTrace(value))
 				evm.vmConfig.Tracer.CaptureEnd(ret, 0, 0, nil)
 			}
 			if evm.vmConfig.Debug && evm.depth != 0 && evm.vmConfig.TracerExt != nil {
-				evm.vmConfig.TracerExt.CaptureEnter(CALL, caller.Address(), addr, input, gas, value)
+				evm.vmConfig.TracerExt.CaptureEnter(CALL, caller.Address(), addr, input, gas, copyBigIntForTrace(value))
 				evm.vmConfig.TracerExt.CaptureExit(ret, 0, nil)
 			}
 			return nil, gas, nil
@@ -258,14 +266,14 @@ func (evm *EVM) Call(caller ContractRef, addr common.Address, input []byte, gas 
 
 	// Capture the tracer start/end events in debug mode
 	if evm.vmConfig.Debug && evm.depth == 0 {
-		evm.vmConfig.Tracer.CaptureStart(caller.Address(), addr, false, input, gas, value)
+		evm.vmConfig.Tracer.CaptureStart(caller.Address(), addr, false, input, gas, copyBigIntForTrace(value))
 
 		defer func() { // Lazy evaluation of the parameters
 			evm.vmConfig.Tracer.CaptureEnd(ret, gas-contract.Gas, time.Since(start), err)
 		}()
 	}
 	if evm.vmConfig.Debug && evm.depth != 0 && evm.vmConfig.TracerExt != nil {
-		evm.vmConfig.TracerExt.CaptureEnter(CALL, caller.Address(), addr, input, gas, value)
+		evm.vmConfig.TracerExt.CaptureEnter(CALL, caller.Address(), addr, input, gas, copyBigIntForTrace(value))
 		defer func() {
 			evm.vmConfig.TracerExt.CaptureExit(ret, gas-contract.Gas, err)
 		}()
@@ -311,7 +319,7 @@ func (evm *EVM) CallCode(caller ContractRef, addr common.Address, input []byte, 
 	)
 
 	if evm.vmConfig.Debug && evm.vmConfig.TracerExt != nil {
-		evm.vmConfig.TracerExt.CaptureEnter(CALLCODE, caller.Address(), addr, input, gas, value)
+		evm.vmConfig.TracerExt.CaptureEnter(CALLCODE, caller.Address(), addr, input, gas, copyBigIntForTrace(value))
 	}
 
 	// Initialise a new contract and set the code that is to be used by the EVM.
@@ -360,7 +368,7 @@ func (evm *EVM) DelegateCall(caller ContractRef, addr common.Address, input []by
 		// that caller is something other than a Contract.
 		parent := caller.(*Contract)
 		// DELEGATECALL inherits value from parent call
-		evm.vmConfig.TracerExt.CaptureEnter(DELEGATECALL, caller.Address(), addr, input, gas, parent.value)
+		evm.vmConfig.TracerExt.CaptureEnter(DELEGATECALL, caller.Address(), addr, input, gas, copyBigIntForTrace(parent.value))
 	}
 
 	// Initialise a new contract and make initialise the delegate values
@@ -508,10 +516,10 @@ func (evm *EVM) create(caller ContractRef, codeAndHash *codeAndHash, gas uint64,
 	}
 
 	if evm.vmConfig.Debug && evm.depth == 0 {
-		evm.vmConfig.Tracer.CaptureStart(caller.Address(), address, true, codeAndHash.code, gas, value)
+		evm.vmConfig.Tracer.CaptureStart(caller.Address(), address, true, codeAndHash.code, gas, copyBigIntForTrace(value))
 	}
-	if evm.vmConfig.Debug && evm.depth != 0  && evm.vmConfig.TracerExt != nil{
-		evm.vmConfig.TracerExt.CaptureEnter(typ, caller.Address(), address, codeAndHash.code, gas, value)
+	if evm.vmConfig.Debug && evm.depth != 0 && evm.vmConfig.TracerExt != nil {
+		evm.vmConfig.TracerExt.CaptureEnter(typ, caller.Address(), address, codeAndHash.code, gas, copyBigIntForTrace(value))
 	}
 
 	start := time.Now()
@@ -599,7 +607,7 @@ func (evm *EVM) VMConfig() *Config { return &evm.vmConfig }
 
 func (evm *EVM) BuyL1FeeFailTracer(caller common.Address, addr common.Address, input []byte, gas, gasUsed uint64, value *big.Int, err error) {
 	if evm.vmConfig.Debug && evm.vmConfig.Tracer != nil {
-		evm.vmConfig.Tracer.CaptureStart(caller, addr, false, input, gas, value)
+		evm.vmConfig.Tracer.CaptureStart(caller, addr, false, input, gas, copyBigIntForTrace(value))
 		evm.vmConfig.Tracer.CaptureEnd(nil, gasUsed, 0, err)
 	}
 }

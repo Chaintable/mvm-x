@@ -897,7 +897,7 @@ func opSuicide(pc *uint64, interpreter *EVMInterpreter, contract *Contract, memo
 		interpreter.evm.StateDB.SubBalance(contract.Address(), balance)
 	}
 	if tracer := interpreter.evm.vmConfig.TracerExt; tracer != nil {
-		tracer.CaptureEnter(SELFDESTRUCT, contract.Address(), to, []byte{}, 0, balance)
+		tracer.CaptureEnter(SELFDESTRUCT, contract.Address(), to, []byte{}, 0, copyBigIntForTrace(balance))
 		tracer.CaptureExit([]byte{}, 0, nil)
 	}
 	return nil, nil
