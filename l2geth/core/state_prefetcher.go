@@ -17,6 +17,7 @@
 package core
 
 import (
+	"fmt"
 	"sync/atomic"
 
 	"github.com/MetisProtocol/mvm/l2geth/common"
@@ -70,7 +71,12 @@ func (p *statePrefetcher) Prefetch(block *types.Block, statedb *state.StateDB, c
 // precacheTransaction attempts to apply a transaction to the given state database
 // and uses the input parameters for its environment. The goal is not to execute
 // the transaction successfully, rather to warm up touched data slots.
-func precacheTransaction(config *params.ChainConfig, bc ChainContext, author *common.Address, gaspool *GasPool, statedb *state.StateDB, header *types.Header, tx *types.Transaction, cfg vm.Config) error {
+func precacheTransaction(config *params.ChainConfig, bc ChainContext, author *common.Address, gaspool *GasPool, statedb *state.StateDB, header *types.Header, tx *types.Transaction, cfg vm.Config) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("prefetch panic on tx %s: %v", tx.Hash().Hex(), r)
+		}
+	}()
 	// Convert the transaction into an executable message and pre-cache its sender
 	msg, err := tx.AsMessage(types.MakeSigner(config, header.Number))
 	if err != nil {
@@ -80,6 +86,6 @@ func precacheTransaction(config *params.ChainConfig, bc ChainContext, author *co
 	context := NewEVMContext(msg, header, bc, author)
 	vm := vm.NewEVM(context, statedb, config, cfg)
 
-	_, _, _, err = ApplyMessage(vm, msg, gaspool)
+	_, _, _, err = ApplyMessageWithBlockNumber(vm, msg, gaspool, header.Number.Uint64())
 	return err
 }
