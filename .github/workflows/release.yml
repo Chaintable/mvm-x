@@ -10,7 +10,7 @@ env:
   AWS_REGION: us-east-1
   REGISTRY: public.ecr.aws/b2h7a5c4/chaintable
   IMAGE: metis-writer
-  IMAGE_DAO: metis-dao-x
+  IMAGE_DAO: metis-dao-writer
 jobs:
   build-image:
     strategy:
