@@ -2,10 +2,16 @@ package main
 
 import (
 	"io"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"testing"
+
+	"github.com/MetisProtocol/mvm/l2geth/core"
+	"github.com/MetisProtocol/mvm/l2geth/core/rawdb"
+	"github.com/MetisProtocol/mvm/l2geth/params"
 )
 
 func TestChainInit(t *testing.T) {
@@ -96,5 +102,119 @@ func TestDumpChainCfg(t *testing.T) {
     "period": 0,
     "epoch": 30000
   }
-}`)
+	}`)
+}
+
+func TestValidateCopyDBTarget(t *testing.T) {
+	genesis := &core.Genesis{Config: params.AllEthashProtocolChanges}
+	source := rawdb.NewMemoryDatabase()
+	defer source.Close()
+	target := rawdb.NewMemoryDatabase()
+	defer target.Close()
+	genesis.MustCommit(source)
+	genesis.MustCommit(target)
+
+	if err := validateCopyDBTarget(source, target); err != nil {
+		t.Fatalf("matching initialized target rejected: %v", err)
+	}
+
+	wrongConfig := *rawdb.ReadChainConfig(target, rawdb.ReadCanonicalHash(target, 0))
+	wrongConfig.ChainID = big.NewInt(999)
+	rawdb.WriteChainConfig(target, rawdb.ReadCanonicalHash(target, 0), &wrongConfig)
+	if err := validateCopyDBTarget(source, target); err == nil {
+		t.Fatal("target with mismatched chain config was accepted")
+	}
+}
+
+func TestValidateCopyDBTargetRejectsUninitializedTarget(t *testing.T) {
+	source := rawdb.NewMemoryDatabase()
+	defer source.Close()
+	target := rawdb.NewMemoryDatabase()
+	defer target.Close()
+	(&core.Genesis{Config: params.AllEthashProtocolChanges}).MustCommit(source)
+
+	if err := validateCopyDBTarget(source, target); err == nil {
+		t.Fatal("uninitialized target was accepted")
+	}
+}
+
+func TestValidateCopyDBPaths(t *testing.T) {
+	root := tmpdir(t)
+	source := filepath.Join(root, "source", "chaindata")
+	target := filepath.Join(root, "target", "chaindata")
+	if err := validateCopyDBPaths(source, filepath.Join(source, "ancient"), target, filepath.Join(target, "ancient")); err != nil {
+		t.Fatalf("separate copydb paths rejected: %v", err)
+	}
+	if err := validateCopyDBPaths(source, filepath.Join(source, "ancient"), source, filepath.Join(source, "ancient")); err == nil {
+		t.Fatal("overlapping copydb paths were accepted")
+	}
+}
+
+func TestVerifyCopyDBHead(t *testing.T) {
+	block := (&core.Genesis{Config: params.AllEthashProtocolChanges}).ToBlock(nil)
+	head := copyDBHead{number: block.NumberU64(), hash: block.Hash(), root: block.Root()}
+	if err := verifyCopyDBHead(head, block); err != nil {
+		t.Fatalf("matching head rejected: %v", err)
+	}
+	head.number++
+	if err := verifyCopyDBHead(head, block); err == nil {
+		t.Fatal("mismatched head was accepted")
+	}
+}
+
+func TestCopyDBGenesisOnly(t *testing.T) {
+	sourceDatadir := tmpdir(t)
+	targetDatadir := tmpdir(t)
+	defer os.RemoveAll(sourceDatadir)
+	defer os.RemoveAll(targetDatadir)
+
+	geth := runGeth(t, "init", "testdata/init.json", "--datadir", sourceDatadir)
+	geth.ExpectRegexp("rcfg UsingOVM[^\\n]*\\n")
+	geth.ExpectExit()
+	geth = runGeth(t, "init", "testdata/init.json", "--datadir", targetDatadir)
+	geth.ExpectRegexp("rcfg UsingOVM[^\\n]*\\n")
+	geth.ExpectExit()
+
+	sourceChaindata := filepath.Join(sourceDatadir, "geth", "chaindata")
+	sourceAncient := filepath.Join(sourceChaindata, "ancient")
+	sourceDB, err := rawdb.NewLevelDBDatabaseWithFreezer(sourceChaindata, 16, 16, sourceAncient, "")
+	if err != nil {
+		t.Fatalf("open source database: %v", err)
+	}
+	rawdb.WriteHeadIndex(sourceDB, 101)
+	rawdb.WriteHeadQueueIndex(sourceDB, 202)
+	if err := sourceDB.Close(); err != nil {
+		t.Fatalf("close source database: %v", err)
+	}
+
+	geth = runGeth(t,
+		"copydb", sourceChaindata, sourceAncient,
+		"--datadir", targetDatadir,
+		"--syncmode", "fast",
+		"--gcmode", "full",
+		"--cache", "16",
+	)
+	geth.ExpectRegexp("(?s).*Compaction done[^\\n]*\\n\\n")
+	geth.ExpectExit()
+
+	targetChaindata := filepath.Join(targetDatadir, "geth", "chaindata")
+	targetDB, err := rawdb.NewLevelDBDatabaseWithFreezer(targetChaindata, 16, 16, filepath.Join(targetChaindata, "ancient"), "")
+	if err != nil {
+		t.Fatalf("open target database: %v", err)
+	}
+	defer targetDB.Close()
+	sourceDB, err = rawdb.NewLevelDBDatabaseWithFreezer(sourceChaindata, 16, 16, sourceAncient, "")
+	if err != nil {
+		t.Fatalf("reopen source database: %v", err)
+	}
+	defer sourceDB.Close()
+	if err := rawdb.VerifyRollupIndexes(sourceDB, targetDB); err != nil {
+		t.Fatalf("verify copied rollup indexes: %v", err)
+	}
+	if got := rawdb.ReadHeadIndex(targetDB); got == nil || *got != 101 {
+		t.Fatalf("unexpected copied head index: %v", got)
+	}
+	if got := rawdb.ReadHeadQueueIndex(targetDB); got == nil || *got != 202 {
+		t.Fatalf("unexpected copied queue index: %v", got)
+	}
 }
