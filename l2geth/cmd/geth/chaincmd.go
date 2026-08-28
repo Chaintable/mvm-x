@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
+	"math/big"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -54,7 +55,7 @@ import (
 var (
 	copydbFullTailFlag = cli.Uint64Flag{
 		Name:  "copydb.full-tail",
-		Usage: "Number of recent blocks to execute fully after the fast-sync pivot",
+		Usage: "Number of recent blocks to execute fully after the pruned state pivot",
 		Value: 256,
 	}
 	initCommand = cli.Command{
@@ -540,35 +541,19 @@ func copyDb(ctx *cli.Context) error {
 	defer chainDb.Close()
 	defer chain.Stop()
 
-	syncBloom := trie.NewSyncBloom(uint64(ctx.GlobalInt(utils.CacheFlag.Name)/2), chainDb)
-	defer syncBloom.Close()
-	dl := downloader.New(0, chainDb, syncBloom, new(event.TypeMux), chain, nil, nil, nil, nil)
-	defer dl.Terminate()
-	if err := dl.SetFastSyncFullBlocks(fullTail); err != nil {
-		return fmt.Errorf("configure fast-sync full tail: %w", err)
-	}
-
-	// Create a source peer to satisfy downloader requests from
+	// Create a source header chain used by the local header and state peers.
 	hc, err := core.NewHeaderChain(sourceDb, chain.Config(), chain.Engine(), func() bool { return false })
 	if err != nil {
-		return err
+		return fmt.Errorf("open source header chain: %w", err)
 	}
-	peer := downloader.NewFakePeer("local", sourceDb, hc, dl)
-	if err = dl.RegisterPeer("local", 63, peer); err != nil {
-		return err
-	}
-	// Synchronise with the simulated peer
-	start := time.Now()
-
 	currentHeader := hc.CurrentHeader()
 	if currentHeader.Hash() != sourceHead.hash || currentHeader.Number.Uint64() != sourceHead.number {
 		return fmt.Errorf("source head changed before synchronization")
 	}
-	if err = dl.Synchronise("local", currentHeader.Hash(), hc.GetTd(currentHeader.Hash(), currentHeader.Number.Uint64()), syncMode); err != nil {
+
+	start := time.Now()
+	if err := copyPrunedChain(sourceDb, chainDb, chain, hc, sourceHead, fullTail, uint64(ctx.GlobalInt(utils.CacheFlag.Name)/2)); err != nil {
 		return err
-	}
-	for dl.Synchronising() {
-		time.Sleep(10 * time.Millisecond)
 	}
 	fmt.Printf("Database copy done in %v\n", time.Since(start))
 
@@ -601,12 +586,19 @@ func copyDb(ctx *cli.Context) error {
 		return fmt.Errorf("verify rollup indexes: %w", err)
 	}
 
-	// Stop the downloader and blockchain before syncing and compacting so all
-	// recent trie state is durable. Both shutdown methods are idempotent.
-	dl.Terminate()
+	// Stop the blockchain before syncing and compacting so the recent trie tail is
+	// durable, then align the fast-head marker with the fully executed head.
 	chain.Stop()
+	rawdb.WriteHeadFastBlockHash(chainDb, sourceHead.hash)
 	if err := chainDb.Sync(); err != nil {
 		return fmt.Errorf("sync target database: %w", err)
+	}
+	durableHead, err := readCopyDBHead(chainDb)
+	if err != nil {
+		return fmt.Errorf("read durable target head: %w", err)
+	}
+	if durableHead != sourceHead {
+		return fmt.Errorf("durable target head no longer matches source head")
 	}
 	if _, err := state.New(sourceHead.root, state.NewDatabaseWithCache(chainDb, 0)); err != nil {
 		return fmt.Errorf("reopen copied head state from disk: %w", err)
@@ -633,6 +625,167 @@ func copyDb(ctx *cli.Context) error {
 	}
 	fmt.Printf("Compaction done in %v.\n\n", time.Since(start))
 	return nil
+}
+
+func copyPrunedChain(sourceDb, targetDb ethdb.Database, chain *core.BlockChain, sourceHeaders *core.HeaderChain, sourceHead copyDBHead, fullTail, stateCache uint64) error {
+	if sourceHead.number == 0 {
+		return verifyCopyDBHead(sourceHead, chain.CurrentBlock())
+	}
+	sourceHeader := sourceHeaders.GetHeader(sourceHead.hash, sourceHead.number)
+	if sourceHeader == nil {
+		return fmt.Errorf("source head header #%d %s is missing", sourceHead.number, sourceHead.hash)
+	}
+	sourceTd := sourceHeaders.GetTd(sourceHead.hash, sourceHead.number)
+	if sourceTd == nil {
+		return fmt.Errorf("source head total difficulty #%d %s is missing", sourceHead.number, sourceHead.hash)
+	}
+
+	start := time.Now()
+	if err := copyDBHeaders(sourceDb, targetDb, chain, sourceHeaders, sourceHeader, sourceTd); err != nil {
+		return err
+	}
+	fmt.Printf("Header copy done in %v\n", time.Since(start))
+	if current := chain.CurrentHeader(); current.Number.Uint64() != sourceHead.number || current.Hash() != sourceHead.hash {
+		return fmt.Errorf("copied header head mismatch: have #%d %s, want #%d %s", current.Number.Uint64(), current.Hash(), sourceHead.number, sourceHead.hash)
+	}
+
+	pivotNumber := uint64(0)
+	if sourceHead.number > fullTail {
+		pivotNumber = sourceHead.number - fullTail
+	}
+	pivotHeader := sourceHeaders.GetHeaderByNumber(pivotNumber)
+	if pivotHeader == nil {
+		return fmt.Errorf("source pivot header #%d is missing", pivotNumber)
+	}
+
+	start = time.Now()
+	if err := copyDBState(sourceDb, targetDb, chain, sourceHeaders, pivotHeader.Root, stateCache); err != nil {
+		return fmt.Errorf("copy pivot state #%d %s: %w", pivotNumber, pivotHeader.Root, err)
+	}
+	if _, err := state.New(pivotHeader.Root, state.NewDatabaseWithCache(targetDb, 0)); err != nil {
+		return fmt.Errorf("open copied pivot state #%d %s: %w", pivotNumber, pivotHeader.Root, err)
+	}
+	fmt.Printf("State copy done in %v at pivot #%d\n", time.Since(start), pivotNumber)
+
+	if pivotNumber > 0 {
+		pivotBlock, pivotReceipts, err := readCopyDBBlock(sourceDb, pivotHeader)
+		if err != nil {
+			return err
+		}
+		if index, err := chain.InsertReceiptChain(types.Blocks{pivotBlock}, []types.Receipts{pivotReceipts}, 0); err != nil {
+			return fmt.Errorf("insert pivot block #%d (index %d): %w", pivotNumber, index, err)
+		}
+		if err := chain.FastSyncCommitHead(pivotBlock.Hash()); err != nil {
+			return fmt.Errorf("commit pivot block #%d: %w", pivotNumber, err)
+		}
+	}
+
+	start = time.Now()
+	if err := copyDBFullTail(sourceDb, chain, sourceHeaders, pivotHeader, sourceHead.number); err != nil {
+		return err
+	}
+	fmt.Printf("Full tail import done in %v (%d blocks)\n", time.Since(start), sourceHead.number-pivotNumber)
+
+	if pivotNumber > 1 {
+		oldNumber := pivotNumber - 1
+		oldHash := rawdb.ReadCanonicalHash(targetDb, oldNumber)
+		if oldHash == (common.Hash{}) {
+			return fmt.Errorf("copied canonical header #%d is missing", oldNumber)
+		}
+		if rawdb.HasBody(targetDb, oldHash, oldNumber) || rawdb.HasReceipts(targetDb, oldHash, oldNumber) {
+			return fmt.Errorf("historical block content before pivot was copied at #%d", oldNumber)
+		}
+	}
+	return verifyCopyDBHead(sourceHead, chain.CurrentBlock())
+}
+
+func copyDBHeaders(sourceDb, targetDb ethdb.Database, chain *core.BlockChain, sourceHeaders *core.HeaderChain, head *types.Header, td *big.Int) error {
+	dl := downloader.New(0, targetDb, nil, new(event.TypeMux), chain, nil, nil, nil, nil)
+	defer dl.Terminate()
+	peer := downloader.NewFakePeer("local", sourceDb, sourceHeaders, dl)
+	if err := dl.RegisterPeer("local", 63, peer); err != nil {
+		return fmt.Errorf("register local header peer: %w", err)
+	}
+	if err := dl.Synchronise("local", head.Hash(), td, downloader.LightSync); err != nil {
+		return fmt.Errorf("copy canonical headers: %w", err)
+	}
+	return nil
+}
+
+func copyDBState(sourceDb, targetDb ethdb.Database, chain *core.BlockChain, sourceHeaders *core.HeaderChain, root common.Hash, cache uint64) error {
+	bloom := trie.NewSyncBloom(cache, targetDb)
+	defer bloom.Close()
+	dl := downloader.New(0, targetDb, bloom, new(event.TypeMux), chain, nil, nil, nil, nil)
+	defer dl.Terminate()
+	peer := downloader.NewFakePeer("local", sourceDb, sourceHeaders, dl)
+	if err := dl.RegisterPeer("local", 63, peer); err != nil {
+		return fmt.Errorf("register local state peer: %w", err)
+	}
+	if err := dl.SynchroniseState("local", root); err != nil {
+		return fmt.Errorf("synchronise state: %w", err)
+	}
+	return nil
+}
+
+func copyDBFullTail(sourceDb ethdb.Database, chain *core.BlockChain, sourceHeaders *core.HeaderChain, pivot *types.Header, head uint64) error {
+	const batchSize = uint64(256)
+
+	parentHash := pivot.Hash()
+	for first := pivot.Number.Uint64() + 1; first <= head; first += batchSize {
+		last := first + batchSize - 1
+		if last > head {
+			last = head
+		}
+		blocks := make(types.Blocks, 0, last-first+1)
+		for number := first; number <= last; number++ {
+			header := sourceHeaders.GetHeaderByNumber(number)
+			if header == nil {
+				return fmt.Errorf("source tail header #%d is missing", number)
+			}
+			block, _, err := readCopyDBBlock(sourceDb, header)
+			if err != nil {
+				return err
+			}
+			if block.ParentHash() != parentHash {
+				return fmt.Errorf("source tail is not contiguous at #%d", number)
+			}
+			blocks = append(blocks, block)
+			parentHash = block.Hash()
+		}
+		if index, err := chain.InsertChain(blocks); err != nil {
+			failed := first
+			if index >= 0 && index < len(blocks) {
+				failed = blocks[index].NumberU64()
+			}
+			return fmt.Errorf("execute full tail at #%d: %w", failed, err)
+		}
+	}
+	return nil
+}
+
+func readCopyDBBlock(db ethdb.Database, header *types.Header) (*types.Block, types.Receipts, error) {
+	number, hash := header.Number.Uint64(), header.Hash()
+	if !rawdb.HasBody(db, hash, number) {
+		return nil, nil, fmt.Errorf("source body #%d %s is missing", number, hash)
+	}
+	block := rawdb.ReadBlock(db, hash, number)
+	if block == nil {
+		return nil, nil, fmt.Errorf("read source block #%d %s", number, hash)
+	}
+	if have := types.DeriveSha(block.Transactions()); have != header.TxHash {
+		return nil, nil, fmt.Errorf("source body transaction root mismatch at #%d %s: have %s want %s", number, hash, have, header.TxHash)
+	}
+	if have := types.CalcUncleHash(block.Uncles()); have != header.UncleHash {
+		return nil, nil, fmt.Errorf("source body uncle hash mismatch at #%d %s: have %s want %s", number, hash, have, header.UncleHash)
+	}
+	if !rawdb.HasReceipts(db, hash, number) {
+		return nil, nil, fmt.Errorf("source receipts #%d %s are missing", number, hash)
+	}
+	receipts := rawdb.ReadRawReceipts(db, hash, number)
+	if have := types.DeriveSha(receipts); have != header.ReceiptHash {
+		return nil, nil, fmt.Errorf("source receipt root mismatch at #%d %s: have %s want %s", number, hash, have, header.ReceiptHash)
+	}
+	return block, receipts, nil
 }
 
 type copyDBHead struct {

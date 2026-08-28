@@ -103,8 +103,6 @@ type Downloader struct {
 	mode SyncMode       // Synchronisation mode defining the strategy used (per sync cycle)
 	mux  *event.TypeMux // Event multiplexer to announce sync operation events
 
-	fastSyncFullBlocks uint64 // Number of blocks to execute fully after the fast-sync pivot
-
 	checkpoint uint64   // Checkpoint block number to enforce head against (e.g. fast sync)
 	genesis    uint64   // Genesis block number to limit sync to (e.g. light client CHT)
 	queue      *queue   // Scheduler for selecting the hashes to download
@@ -221,27 +219,26 @@ func New(checkpoint uint64, stateDb ethdb.Database, stateBloom *trie.SyncBloom, 
 		lightchain = chain
 	}
 	dl := &Downloader{
-		stateDB:            stateDb,
-		stateBloom:         stateBloom,
-		mux:                mux,
-		checkpoint:         checkpoint,
-		queue:              newQueue(),
-		peers:              newPeerSet(),
-		rttEstimate:        uint64(rttMaxEstimate),
-		rttConfidence:      uint64(1000000),
-		blockchain:         chain,
-		lightchain:         lightchain,
-		dropPeer:           dropPeer,
-		fastSyncFullBlocks: uint64(fsMinFullBlocks),
-		headerCh:           make(chan dataPack, 1),
-		bodyCh:             make(chan dataPack, 1),
-		receiptCh:          make(chan dataPack, 1),
-		bodyWakeCh:         make(chan bool, 1),
-		receiptWakeCh:      make(chan bool, 1),
-		headerProcCh:       make(chan []*types.Header, 1),
-		quitCh:             make(chan struct{}),
-		stateCh:            make(chan dataPack),
-		stateSyncStart:     make(chan *stateSync),
+		stateDB:        stateDb,
+		stateBloom:     stateBloom,
+		mux:            mux,
+		checkpoint:     checkpoint,
+		queue:          newQueue(),
+		peers:          newPeerSet(),
+		rttEstimate:    uint64(rttMaxEstimate),
+		rttConfidence:  uint64(1000000),
+		blockchain:     chain,
+		lightchain:     lightchain,
+		dropPeer:       dropPeer,
+		headerCh:       make(chan dataPack, 1),
+		bodyCh:         make(chan dataPack, 1),
+		receiptCh:      make(chan dataPack, 1),
+		bodyWakeCh:     make(chan bool, 1),
+		receiptWakeCh:  make(chan bool, 1),
+		headerProcCh:   make(chan []*types.Header, 1),
+		quitCh:         make(chan struct{}),
+		stateCh:        make(chan dataPack),
+		stateSyncStart: make(chan *stateSync),
 		syncStatsState: stateSyncStats{
 			processed: rawdb.ReadFastTrieProgress(stateDb),
 		},
@@ -253,26 +250,6 @@ func New(checkpoint uint64, stateDb ethdb.Database, stateBloom *trie.SyncBloom, 
 	go dl.qosTuner()
 	go dl.stateFetcher()
 	return dl
-}
-
-// SetFastSyncFullBlocks configures how many blocks are fully executed after the
-// fast-sync pivot. It must be called before a sync starts.
-func (d *Downloader) SetFastSyncFullBlocks(blocks uint64) error {
-	if blocks == 0 {
-		return errors.New("fast-sync full block count must be greater than zero")
-	}
-	if d.Synchronising() {
-		return errBusy
-	}
-	d.fastSyncFullBlocks = blocks
-	return nil
-}
-
-func (d *Downloader) fastSyncFullBlockCount() uint64 {
-	if d.fastSyncFullBlocks == 0 {
-		return uint64(fsMinFullBlocks)
-	}
-	return d.fastSyncFullBlocks
 }
 
 // Progress retrieves the synchronisation boundaries, specifically the origin
@@ -484,11 +461,10 @@ func (d *Downloader) syncWithPeer(p *peerConnection, hash common.Hash, td *big.I
 	// Ensure our origin point is below any fast sync pivot point
 	pivot := uint64(0)
 	if d.mode == FastSync {
-		fullBlocks := d.fastSyncFullBlockCount()
-		if height <= fullBlocks {
+		if height <= uint64(fsMinFullBlocks) {
 			origin = 0
 		} else {
-			pivot = height - fullBlocks
+			pivot = height - uint64(fsMinFullBlocks)
 			if pivot <= origin {
 				origin = pivot - 1
 			}
@@ -1247,6 +1223,11 @@ func (d *Downloader) fetchParts(deliveryCh chan dataPack, deliver func(dataPack)
 				// idle. If the delivery's stale, the peer should have already been idled.
 				if err != errStaleDelivery {
 					setIdle(peer, accepted)
+				} else if d.dropPeer == nil {
+					// A local copy has only one peer. Leaving it marked busy after a
+					// stale response permanently deadlocks all subsequent requests.
+					setIdle(peer, 0)
+					return fmt.Errorf("local %s delivery rejected: %w", kind, err)
 				}
 				// Issue a log to the user to see what's going on
 				switch {
@@ -1305,8 +1286,9 @@ func (d *Downloader) fetchParts(deliveryCh chan dataPack, deliver func(dataPack)
 
 						if d.dropPeer == nil {
 							// The dropPeer method is nil when `--copydb` is used for a local copy.
-							// Timeouts can occur if e.g. compaction hits at the wrong time, and can be ignored
+							// Return the peer to the idle set so the local request can be retried.
 							peer.log.Warn("Downloader wants to drop peer, but peerdrop-function is not set", "peer", pid)
+							setIdle(peer, 0)
 						} else {
 							d.dropPeer(pid)
 
@@ -1629,9 +1611,8 @@ func (d *Downloader) processFastSyncContent(latest *types.Header) error {
 	// Figure out the ideal pivot block. Note, that this goalpost may move if the
 	// sync takes long enough for the chain head to move significantly.
 	pivot := uint64(0)
-	fullBlocks := d.fastSyncFullBlockCount()
-	if height := latest.Number.Uint64(); height > fullBlocks {
-		pivot = height - fullBlocks
+	if height := latest.Number.Uint64(); height > uint64(fsMinFullBlocks) {
+		pivot = height - uint64(fsMinFullBlocks)
 	}
 	// To cater for moving pivot points, track the pivot block and subsequently
 	// accumulated download results separately.
@@ -1665,9 +1646,9 @@ func (d *Downloader) processFastSyncContent(latest *types.Header) error {
 		// Split around the pivot block and process the two sides via fast/full sync
 		if atomic.LoadInt32(&d.committed) == 0 {
 			latest = results[len(results)-1].Header
-			if height := latest.Number.Uint64(); height > pivot+2*fullBlocks {
-				log.Warn("Pivot became stale, moving", "old", pivot, "new", height-fullBlocks)
-				pivot = height - fullBlocks
+			if height := latest.Number.Uint64(); height > pivot+2*uint64(fsMinFullBlocks) {
+				log.Warn("Pivot became stale, moving", "old", pivot, "new", height-uint64(fsMinFullBlocks))
+				pivot = height - uint64(fsMinFullBlocks)
 			}
 		}
 		P, beforeP, afterP := splitAroundPivot(pivot, results)
