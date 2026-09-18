@@ -1223,6 +1223,11 @@ func (d *Downloader) fetchParts(deliveryCh chan dataPack, deliver func(dataPack)
 				// idle. If the delivery's stale, the peer should have already been idled.
 				if err != errStaleDelivery {
 					setIdle(peer, accepted)
+				} else if d.dropPeer == nil {
+					// A local copy has only one peer. Leaving it marked busy after a
+					// stale response permanently deadlocks all subsequent requests.
+					setIdle(peer, 0)
+					return fmt.Errorf("local %s delivery rejected: %w", kind, err)
 				}
 				// Issue a log to the user to see what's going on
 				switch {
@@ -1281,8 +1286,9 @@ func (d *Downloader) fetchParts(deliveryCh chan dataPack, deliver func(dataPack)
 
 						if d.dropPeer == nil {
 							// The dropPeer method is nil when `--copydb` is used for a local copy.
-							// Timeouts can occur if e.g. compaction hits at the wrong time, and can be ignored
+							// Return the peer to the idle set so the local request can be retried.
 							peer.log.Warn("Downloader wants to drop peer, but peerdrop-function is not set", "peer", pid)
+							setIdle(peer, 0)
 						} else {
 							d.dropPeer(pid)
 
