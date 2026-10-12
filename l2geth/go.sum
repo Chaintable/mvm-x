@@ -45,6 +45,8 @@ github.com/Azure/go-autorest/tracing v0.6.0 h1:TYi4+3m5t6K48TGI9AUdb+IzbnSxvnvUM
 github.com/Azure/go-autorest/tracing v0.6.0/go.mod h1:+vhtPC754Xsa23ID7GlGsrdKBpUA79WCAKPPZVC2DeU=
 github.com/BurntSushi/toml v0.3.1/go.mod h1:xHWCNGjB5oqiDr8zfno3MHue2Ht5sIBksp03qcyfWMU=
 github.com/BurntSushi/xgb v0.0.0-20160522181843-27f122750802/go.mod h1:IVnqGOEym/WlBOVXweHU+Q+/VP0lqqI8lqeDx9IjBqo=
+github.com/Chaintable/pipeline v0.0.63-metis-ct.5 h1:bUTaDBVniygZiaf0PxWPQBZ+1wWmNBpzk/0eqYeJY1A=
+github.com/Chaintable/pipeline v0.0.63-metis-ct.5/go.mod h1:dQrv50cw7AdMkKWGCi/IahHb74BvfdZFE72AsqG0+YA=
 github.com/Chaintable/pipeline v0.0.63-metis-debank-3 h1:MwjSgE9G9zARQv2PINrR63y5OTXqRTHTfci1lLCyNfU=
 github.com/Chaintable/pipeline v0.0.63-metis-debank-3/go.mod h1:dQrv50cw7AdMkKWGCi/IahHb74BvfdZFE72AsqG0+YA=
 github.com/Chaintable/pipeline v0.0.63-metis-debank-4 h1:xaptUda3lCZVl/Qr/T7Dvd/Wl3ET9UvBVK7TADboDM8=
