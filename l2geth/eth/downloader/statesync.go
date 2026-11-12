@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"hash"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/crypto/sha3"
@@ -31,6 +32,28 @@ import (
 	"github.com/MetisProtocol/mvm/l2geth/log"
 	"github.com/MetisProtocol/mvm/l2geth/trie"
 )
+
+// SynchroniseState downloads and verifies the state trie identified by root
+// without starting header, body, or receipt synchronisation.
+func (d *Downloader) SynchroniseState(id string, root common.Hash) error {
+	if !atomic.CompareAndSwapInt32(&d.synchronising, 0, 1) {
+		return errBusy
+	}
+	defer atomic.StoreInt32(&d.synchronising, 0)
+
+	if d.peers.Peer(id) == nil {
+		return errUnknownPeer
+	}
+	d.peers.Reset()
+
+	d.cancelLock.Lock()
+	d.cancelCh = make(chan struct{})
+	d.cancelPeer = id
+	d.cancelLock.Unlock()
+	defer d.Cancel()
+
+	return d.syncState(root).Wait()
+}
 
 // stateReq represents a batch of state fetch requests grouped together into
 // a single data retrieval network packet.

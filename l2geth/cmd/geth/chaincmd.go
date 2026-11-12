@@ -23,12 +23,14 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
+	"math/big"
 	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
 	"runtime"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -44,12 +46,18 @@ import (
 	"github.com/MetisProtocol/mvm/l2geth/core/state"
 	"github.com/MetisProtocol/mvm/l2geth/core/types"
 	"github.com/MetisProtocol/mvm/l2geth/eth/downloader"
+	"github.com/MetisProtocol/mvm/l2geth/ethdb"
 	"github.com/MetisProtocol/mvm/l2geth/event"
 	"github.com/MetisProtocol/mvm/l2geth/log"
 	"github.com/MetisProtocol/mvm/l2geth/trie"
 )
 
 var (
+	copydbFullTailFlag = cli.Uint64Flag{
+		Name:  "copydb.full-tail",
+		Usage: "Number of recent blocks to execute fully after the pruned state pivot",
+		Value: 256,
+	}
 	initCommand = cli.Command{
 		Action:    utils.MigrateFlags(initGenesis),
 		Name:      "init",
@@ -152,19 +160,23 @@ The export-preimages command export hash preimages to an RLP encoded stream`,
 	copydbCommand = cli.Command{
 		Action:    utils.MigrateFlags(copyDb),
 		Name:      "copydb",
-		Usage:     "Create a local chain from a target chaindata folder",
-		ArgsUsage: "<sourceChaindataDir>",
+		Usage:     "Create a pruned full-mode chain from an offline chaindata folder",
+		ArgsUsage: "<sourceChaindataDir> <sourceAncientDir>",
 		Flags: []cli.Flag{
 			utils.DataDirFlag,
+			utils.AncientFlag,
 			utils.CacheFlag,
 			utils.SyncModeFlag,
+			utils.GCModeFlag,
 			utils.FakePoWFlag,
 			utils.TestnetFlag,
 			utils.RinkebyFlag,
+			copydbFullTailFlag,
 		},
 		Category: "BLOCKCHAIN COMMANDS",
 		Description: `
-The first argument must be the directory containing the blockchain to download from`,
+The target datadir must first be initialized with the same genesis as the source.
+The source must be offline and the target must contain only the initialized genesis.`,
 	}
 	removedbCommand = cli.Command{
 		Action:    utils.MigrateFlags(removeDB),
@@ -472,59 +484,423 @@ func exportPreimages(ctx *cli.Context) error {
 }
 
 func copyDb(ctx *cli.Context) error {
-	// Ensure we have a source chain directory to copy
-	if len(ctx.Args()) < 1 {
-		utils.Fatalf("Source chaindata directory path argument missing")
+	if len(ctx.Args()) != 2 {
+		return fmt.Errorf("copydb requires source chaindata and source ancient directory paths")
 	}
-	if len(ctx.Args()) < 2 {
-		utils.Fatalf("Source ancient chain directory path argument missing")
+	syncMode := *utils.GlobalTextMarshaler(ctx, utils.SyncModeFlag.Name).(*downloader.SyncMode)
+	if syncMode != downloader.FastSync {
+		return fmt.Errorf("copydb requires --%s=fast", utils.SyncModeFlag.Name)
 	}
-	// Initialize a new chain for the running node to sync into
+	if gcmode := ctx.GlobalString(utils.GCModeFlag.Name); gcmode != "full" {
+		return fmt.Errorf("copydb requires --%s=full, got %q", utils.GCModeFlag.Name, gcmode)
+	}
+	fullTail := ctx.Uint64(copydbFullTailFlag.Name)
+	if fullTail < core.TriesInMemory {
+		return fmt.Errorf("--%s must be at least %d", copydbFullTailFlag.Name, core.TriesInMemory)
+	}
+
+	// Build the target paths before opening either database and ensure the source
+	// and target cannot resolve to overlapping directories.
 	stack := makeFullNode(ctx)
 	defer stack.Close()
+	targetChaindata := stack.ResolvePath("chaindata")
+	targetAncient := ctx.GlobalString(utils.AncientFlag.Name)
+	switch {
+	case targetAncient == "":
+		targetAncient = filepath.Join(targetChaindata, "ancient")
+	case !filepath.IsAbs(targetAncient):
+		targetAncient = stack.ResolvePath(targetAncient)
+	}
+	if err := validateCopyDBPaths(ctx.Args().First(), ctx.Args().Get(1), targetChaindata, targetAncient); err != nil {
+		return err
+	}
+
+	// Open the offline source and capture the exact cutover head.
+	sourceDb, err := rawdb.NewLevelDBDatabaseWithFreezer(ctx.Args().First(), ctx.GlobalInt(utils.CacheFlag.Name)/2, 256, ctx.Args().Get(1), "")
+	if err != nil {
+		return fmt.Errorf("open source database: %w", err)
+	}
+	defer sourceDb.Close()
+	sourceHead, err := readCopyDBHead(sourceDb)
+	if err != nil {
+		return fmt.Errorf("read source head: %w", err)
+	}
+
+	// Probe the target before MakeChain can initialize a default Ethereum genesis.
+	// A valid target must have been initialized explicitly with the Metis genesis.
+	targetProbe := utils.MakeChainDatabase(ctx, stack)
+	if err := validateCopyDBTarget(sourceDb, targetProbe); err != nil {
+		targetProbe.Close()
+		return err
+	}
+	if err := targetProbe.Close(); err != nil {
+		return fmt.Errorf("close target database after preflight: %w", err)
+	}
 
 	chain, chainDb := utils.MakeChain(ctx, stack)
-	syncMode := *utils.GlobalTextMarshaler(ctx, utils.SyncModeFlag.Name).(*downloader.SyncMode)
+	defer chainDb.Close()
+	defer chain.Stop()
 
-	var syncBloom *trie.SyncBloom
-	if syncMode == downloader.FastSync {
-		syncBloom = trie.NewSyncBloom(uint64(ctx.GlobalInt(utils.CacheFlag.Name)/2), chainDb)
-	}
-	dl := downloader.New(0, chainDb, syncBloom, new(event.TypeMux), chain, nil, nil, nil, nil)
-
-	// Create a source peer to satisfy downloader requests from
-	db, err := rawdb.NewLevelDBDatabaseWithFreezer(ctx.Args().First(), ctx.GlobalInt(utils.CacheFlag.Name)/2, 256, ctx.Args().Get(1), "")
+	// Create a source header chain used by the local header and state peers.
+	hc, err := core.NewHeaderChain(sourceDb, chain.Config(), chain.Engine(), func() bool { return false })
 	if err != nil {
-		return err
+		return fmt.Errorf("open source header chain: %w", err)
 	}
-	hc, err := core.NewHeaderChain(db, chain.Config(), chain.Engine(), func() bool { return false })
-	if err != nil {
-		return err
-	}
-	peer := downloader.NewFakePeer("local", db, hc, dl)
-	if err = dl.RegisterPeer("local", 63, peer); err != nil {
-		return err
-	}
-	// Synchronise with the simulated peer
-	start := time.Now()
-
 	currentHeader := hc.CurrentHeader()
-	if err = dl.Synchronise("local", currentHeader.Hash(), hc.GetTd(currentHeader.Hash(), currentHeader.Number.Uint64()), syncMode); err != nil {
-		return err
+	if currentHeader.Hash() != sourceHead.hash || currentHeader.Number.Uint64() != sourceHead.number {
+		return fmt.Errorf("source head changed before synchronization")
 	}
-	for dl.Synchronising() {
-		time.Sleep(10 * time.Millisecond)
+
+	start := time.Now()
+	if err := copyPrunedChain(sourceDb, chainDb, chain, hc, sourceHead, fullTail, uint64(ctx.GlobalInt(utils.CacheFlag.Name)/2)); err != nil {
+		return err
 	}
 	fmt.Printf("Database copy done in %v\n", time.Since(start))
 
-	// Compact the entire database to remove any sync overhead
+	// The source must remain fixed for the entire migration, and the target must
+	// finish at exactly the same canonical head and state root.
+	finalSourceHead, err := readCopyDBHead(sourceDb)
+	if err != nil {
+		return fmt.Errorf("re-read source head: %w", err)
+	}
+	if finalSourceHead != sourceHead {
+		return fmt.Errorf("source head changed during copydb")
+	}
+	if err := verifyCopyDBHead(sourceHead, chain.CurrentBlock()); err != nil {
+		return err
+	}
+	if _, err := chain.StateAt(sourceHead.root); err != nil {
+		return fmt.Errorf("open copied head state: %w", err)
+	}
+
+	// Carry the Metis rollup checkpoint forward so the writer resumes after the
+	// cutover head instead of replaying historical L2 input.
+	batch := chainDb.NewBatch()
+	if err := rawdb.CopyRollupIndexes(sourceDb, batch); err != nil {
+		return fmt.Errorf("copy rollup indexes: %w", err)
+	}
+	if err := batch.Write(); err != nil {
+		return fmt.Errorf("write rollup indexes: %w", err)
+	}
+	if err := rawdb.VerifyRollupIndexes(sourceDb, chainDb); err != nil {
+		return fmt.Errorf("verify rollup indexes: %w", err)
+	}
+
+	// Stop the blockchain before syncing and compacting so the recent trie tail is
+	// durable, then align the fast-head marker with the fully executed head.
+	chain.Stop()
+	rawdb.WriteHeadFastBlockHash(chainDb, sourceHead.hash)
+	if err := chainDb.Sync(); err != nil {
+		return fmt.Errorf("sync target database: %w", err)
+	}
+	durableHead, err := readCopyDBHead(chainDb)
+	if err != nil {
+		return fmt.Errorf("read durable target head: %w", err)
+	}
+	if durableHead != sourceHead {
+		return fmt.Errorf("durable target head no longer matches source head")
+	}
+	if _, err := state.New(sourceHead.root, state.NewDatabaseWithCache(chainDb, 0)); err != nil {
+		return fmt.Errorf("reopen copied head state from disk: %w", err)
+	}
+
+	// Compact only the target LevelDB to reclaim fast-sync write amplification.
 	start = time.Now()
-	fmt.Println("Compacting entire database...")
-	if err = db.Compact(nil, nil); err != nil {
-		utils.Fatalf("Compaction failed: %v", err)
+	fmt.Println("Compacting target database...")
+	if err = chainDb.Compact(nil, nil); err != nil {
+		return fmt.Errorf("compact target database: %w", err)
+	}
+	if err := chainDb.Sync(); err != nil {
+		return fmt.Errorf("sync compacted target database: %w", err)
+	}
+	compactedHead, err := readCopyDBHead(chainDb)
+	if err != nil {
+		return fmt.Errorf("read compacted target head: %w", err)
+	}
+	if compactedHead != sourceHead {
+		return fmt.Errorf("compacted target head no longer matches source head")
+	}
+	if _, err := state.New(sourceHead.root, state.NewDatabaseWithCache(chainDb, 0)); err != nil {
+		return fmt.Errorf("reopen compacted target head state: %w", err)
 	}
 	fmt.Printf("Compaction done in %v.\n\n", time.Since(start))
 	return nil
+}
+
+func copyPrunedChain(sourceDb, targetDb ethdb.Database, chain *core.BlockChain, sourceHeaders *core.HeaderChain, sourceHead copyDBHead, fullTail, stateCache uint64) error {
+	if sourceHead.number == 0 {
+		return verifyCopyDBHead(sourceHead, chain.CurrentBlock())
+	}
+	sourceHeader := sourceHeaders.GetHeader(sourceHead.hash, sourceHead.number)
+	if sourceHeader == nil {
+		return fmt.Errorf("source head header #%d %s is missing", sourceHead.number, sourceHead.hash)
+	}
+	sourceTd := sourceHeaders.GetTd(sourceHead.hash, sourceHead.number)
+	if sourceTd == nil {
+		return fmt.Errorf("source head total difficulty #%d %s is missing", sourceHead.number, sourceHead.hash)
+	}
+
+	start := time.Now()
+	if err := copyDBHeaders(sourceDb, targetDb, chain, sourceHeaders, sourceHeader, sourceTd); err != nil {
+		return err
+	}
+	fmt.Printf("Header copy done in %v\n", time.Since(start))
+	if current := chain.CurrentHeader(); current.Number.Uint64() != sourceHead.number || current.Hash() != sourceHead.hash {
+		return fmt.Errorf("copied header head mismatch: have #%d %s, want #%d %s", current.Number.Uint64(), current.Hash(), sourceHead.number, sourceHead.hash)
+	}
+
+	pivotNumber := uint64(0)
+	if sourceHead.number > fullTail {
+		pivotNumber = sourceHead.number - fullTail
+	}
+	pivotHeader := sourceHeaders.GetHeaderByNumber(pivotNumber)
+	if pivotHeader == nil {
+		return fmt.Errorf("source pivot header #%d is missing", pivotNumber)
+	}
+
+	start = time.Now()
+	if err := copyDBState(sourceDb, targetDb, chain, sourceHeaders, pivotHeader.Root, stateCache); err != nil {
+		return fmt.Errorf("copy pivot state #%d %s: %w", pivotNumber, pivotHeader.Root, err)
+	}
+	if _, err := state.New(pivotHeader.Root, state.NewDatabaseWithCache(targetDb, 0)); err != nil {
+		return fmt.Errorf("open copied pivot state #%d %s: %w", pivotNumber, pivotHeader.Root, err)
+	}
+	fmt.Printf("State copy done in %v at pivot #%d\n", time.Since(start), pivotNumber)
+
+	if pivotNumber > 0 {
+		pivotBlock, pivotReceipts, err := readCopyDBBlock(sourceDb, pivotHeader)
+		if err != nil {
+			return err
+		}
+		if index, err := chain.InsertReceiptChain(types.Blocks{pivotBlock}, []types.Receipts{pivotReceipts}, 0); err != nil {
+			return fmt.Errorf("insert pivot block #%d (index %d): %w", pivotNumber, index, err)
+		}
+		if err := chain.FastSyncCommitHead(pivotBlock.Hash()); err != nil {
+			return fmt.Errorf("commit pivot block #%d: %w", pivotNumber, err)
+		}
+	}
+
+	start = time.Now()
+	if err := copyDBFullTail(sourceDb, chain, sourceHeaders, pivotHeader, sourceHead.number); err != nil {
+		return err
+	}
+	fmt.Printf("Full tail import done in %v (%d blocks)\n", time.Since(start), sourceHead.number-pivotNumber)
+
+	if pivotNumber > 1 {
+		oldNumber := pivotNumber - 1
+		oldHash := rawdb.ReadCanonicalHash(targetDb, oldNumber)
+		if oldHash == (common.Hash{}) {
+			return fmt.Errorf("copied canonical header #%d is missing", oldNumber)
+		}
+		if rawdb.HasBody(targetDb, oldHash, oldNumber) || rawdb.HasReceipts(targetDb, oldHash, oldNumber) {
+			return fmt.Errorf("historical block content before pivot was copied at #%d", oldNumber)
+		}
+	}
+	return verifyCopyDBHead(sourceHead, chain.CurrentBlock())
+}
+
+func copyDBHeaders(sourceDb, targetDb ethdb.Database, chain *core.BlockChain, sourceHeaders *core.HeaderChain, head *types.Header, td *big.Int) error {
+	dl := downloader.New(0, targetDb, nil, new(event.TypeMux), chain, nil, nil, nil, nil)
+	defer dl.Terminate()
+	peer := downloader.NewFakePeer("local", sourceDb, sourceHeaders, dl)
+	if err := dl.RegisterPeer("local", 63, peer); err != nil {
+		return fmt.Errorf("register local header peer: %w", err)
+	}
+	if err := dl.Synchronise("local", head.Hash(), td, downloader.LightSync); err != nil {
+		return fmt.Errorf("copy canonical headers: %w", err)
+	}
+	return nil
+}
+
+func copyDBState(sourceDb, targetDb ethdb.Database, chain *core.BlockChain, sourceHeaders *core.HeaderChain, root common.Hash, cache uint64) error {
+	bloom := trie.NewSyncBloom(cache, targetDb)
+	defer bloom.Close()
+	dl := downloader.New(0, targetDb, bloom, new(event.TypeMux), chain, nil, nil, nil, nil)
+	defer dl.Terminate()
+	peer := downloader.NewFakePeer("local", sourceDb, sourceHeaders, dl)
+	if err := dl.RegisterPeer("local", 63, peer); err != nil {
+		return fmt.Errorf("register local state peer: %w", err)
+	}
+	if err := dl.SynchroniseState("local", root); err != nil {
+		return fmt.Errorf("synchronise state: %w", err)
+	}
+	return nil
+}
+
+func copyDBFullTail(sourceDb ethdb.Database, chain *core.BlockChain, sourceHeaders *core.HeaderChain, pivot *types.Header, head uint64) error {
+	const batchSize = uint64(256)
+
+	parentHash := pivot.Hash()
+	for first := pivot.Number.Uint64() + 1; first <= head; first += batchSize {
+		last := first + batchSize - 1
+		if last > head {
+			last = head
+		}
+		blocks := make(types.Blocks, 0, last-first+1)
+		for number := first; number <= last; number++ {
+			header := sourceHeaders.GetHeaderByNumber(number)
+			if header == nil {
+				return fmt.Errorf("source tail header #%d is missing", number)
+			}
+			block, _, err := readCopyDBBlock(sourceDb, header)
+			if err != nil {
+				return err
+			}
+			if block.ParentHash() != parentHash {
+				return fmt.Errorf("source tail is not contiguous at #%d", number)
+			}
+			blocks = append(blocks, block)
+			parentHash = block.Hash()
+		}
+		if index, err := chain.InsertChain(blocks); err != nil {
+			failed := first
+			if index >= 0 && index < len(blocks) {
+				failed = blocks[index].NumberU64()
+			}
+			return fmt.Errorf("execute full tail at #%d: %w", failed, err)
+		}
+	}
+	return nil
+}
+
+func readCopyDBBlock(db ethdb.Database, header *types.Header) (*types.Block, types.Receipts, error) {
+	number, hash := header.Number.Uint64(), header.Hash()
+	if !rawdb.HasBody(db, hash, number) {
+		return nil, nil, fmt.Errorf("source body #%d %s is missing", number, hash)
+	}
+	block := rawdb.ReadBlock(db, hash, number)
+	if block == nil {
+		return nil, nil, fmt.Errorf("read source block #%d %s", number, hash)
+	}
+	if have := types.DeriveSha(block.Transactions()); have != header.TxHash {
+		return nil, nil, fmt.Errorf("source body transaction root mismatch at #%d %s: have %s want %s", number, hash, have, header.TxHash)
+	}
+	if have := types.CalcUncleHash(block.Uncles()); have != header.UncleHash {
+		return nil, nil, fmt.Errorf("source body uncle hash mismatch at #%d %s: have %s want %s", number, hash, have, header.UncleHash)
+	}
+	if !rawdb.HasReceipts(db, hash, number) {
+		return nil, nil, fmt.Errorf("source receipts #%d %s are missing", number, hash)
+	}
+	receipts := rawdb.ReadRawReceipts(db, hash, number)
+	if have := types.DeriveSha(receipts); have != header.ReceiptHash {
+		return nil, nil, fmt.Errorf("source receipt root mismatch at #%d %s: have %s want %s", number, hash, have, header.ReceiptHash)
+	}
+	return block, receipts, nil
+}
+
+type copyDBHead struct {
+	number uint64
+	hash   common.Hash
+	root   common.Hash
+}
+
+func readCopyDBHead(db ethdb.Database) (copyDBHead, error) {
+	headerHash := rawdb.ReadHeadHeaderHash(db)
+	blockHash := rawdb.ReadHeadBlockHash(db)
+	fastHash := rawdb.ReadHeadFastBlockHash(db)
+	if headerHash == (common.Hash{}) {
+		return copyDBHead{}, fmt.Errorf("missing head header hash")
+	}
+	if headerHash != blockHash || headerHash != fastHash {
+		return copyDBHead{}, fmt.Errorf("head header, block and fast block are not aligned")
+	}
+	number := rawdb.ReadHeaderNumber(db, headerHash)
+	if number == nil {
+		return copyDBHead{}, fmt.Errorf("missing number for head %s", headerHash)
+	}
+	header := rawdb.ReadHeader(db, headerHash, *number)
+	if header == nil {
+		return copyDBHead{}, fmt.Errorf("missing header %d %s", *number, headerHash)
+	}
+	if rawdb.ReadTd(db, headerHash, *number) == nil {
+		return copyDBHead{}, fmt.Errorf("missing total difficulty for head %d %s", *number, headerHash)
+	}
+	return copyDBHead{number: *number, hash: headerHash, root: header.Root}, nil
+}
+
+func validateCopyDBTarget(source ethdb.Database, target ethdb.Database) error {
+	sourceGenesis := rawdb.ReadCanonicalHash(source, 0)
+	if sourceGenesis == (common.Hash{}) {
+		return fmt.Errorf("source database has no genesis")
+	}
+	targetGenesis := rawdb.ReadCanonicalHash(target, 0)
+	if targetGenesis == (common.Hash{}) {
+		return fmt.Errorf("target datadir is not initialized; run geth init with the Metis genesis first")
+	}
+	if sourceGenesis != targetGenesis {
+		return fmt.Errorf("source and target genesis hashes differ: source %s target %s", sourceGenesis, targetGenesis)
+	}
+	sourceConfig, targetConfig := rawdb.ReadChainConfig(source, sourceGenesis), rawdb.ReadChainConfig(target, targetGenesis)
+	if sourceConfig == nil || targetConfig == nil {
+		return fmt.Errorf("source or target chain config is missing")
+	}
+	sourceJSON, err := json.Marshal(sourceConfig)
+	if err != nil {
+		return fmt.Errorf("encode source chain config: %w", err)
+	}
+	targetJSON, err := json.Marshal(targetConfig)
+	if err != nil {
+		return fmt.Errorf("encode target chain config: %w", err)
+	}
+	if !bytes.Equal(sourceJSON, targetJSON) {
+		return fmt.Errorf("source and target chain configs differ")
+	}
+	targetHead, err := readCopyDBHead(target)
+	if err != nil {
+		return fmt.Errorf("read target head: %w", err)
+	}
+	if targetHead.number != 0 || targetHead.hash != targetGenesis {
+		return fmt.Errorf("target database is not fresh; expected genesis-only datadir")
+	}
+	return nil
+}
+
+func verifyCopyDBHead(source copyDBHead, target *types.Block) error {
+	if target == nil {
+		return fmt.Errorf("target head block is missing")
+	}
+	if source.number != target.NumberU64() || source.hash != target.Hash() || source.root != target.Root() {
+		return fmt.Errorf("copied head mismatch: source #%d %s root %s, target #%d %s root %s",
+			source.number, source.hash, source.root, target.NumberU64(), target.Hash(), target.Root())
+	}
+	return nil
+}
+
+func validateCopyDBPaths(sourceChaindata, sourceAncient, targetChaindata, targetAncient string) error {
+	sourceChaindata = canonicalCopyDBPath(sourceChaindata)
+	sourceAncient = canonicalCopyDBPath(sourceAncient)
+	targetChaindata = canonicalCopyDBPath(targetChaindata)
+	targetAncient = canonicalCopyDBPath(targetAncient)
+	if copyDBPathsOverlap(sourceChaindata, targetChaindata) {
+		return fmt.Errorf("source and target chaindata paths overlap: %s and %s", sourceChaindata, targetChaindata)
+	}
+	if copyDBPathsOverlap(sourceAncient, targetAncient) {
+		return fmt.Errorf("source and target ancient paths overlap: %s and %s", sourceAncient, targetAncient)
+	}
+	return nil
+}
+
+func canonicalCopyDBPath(path string) string {
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		return filepath.Clean(path)
+	}
+	if resolved, err := filepath.EvalSymlinks(absolute); err == nil {
+		return resolved
+	}
+	return filepath.Clean(absolute)
+}
+
+func copyDBPathsOverlap(first, second string) bool {
+	if first == second {
+		return true
+	}
+	relative, err := filepath.Rel(first, second)
+	if err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(os.PathSeparator)) {
+		return true
+	}
+	relative, err = filepath.Rel(second, first)
+	return err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(os.PathSeparator))
 }
 
 func removeDB(ctx *cli.Context) error {
