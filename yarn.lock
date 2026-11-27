@@ -1935,17 +1935,6 @@
     tweetnacl "^1.0.3"
     tweetnacl-util "^0.15.1"
 
-"@metis.io/contracts@^1.2.1":
-  version "1.2.3"
-  resolved "https://registry.yarnpkg.com/@metis.io/contracts/-/contracts-1.2.3.tgz#b8095df23c6a009624cfd74e8b6b2720bd75ec64"
-  integrity sha512-KWQQFtF3ruMYdsQGnbNkpWH0Zm9ee60TRijpmz4g9FEc6L+Lw07LSuxJOtl8kqj/k7xAvV1faNrc86if64mVMA==
-  dependencies:
-    "@eth-optimism/core-utils" "^0.6.1"
-    "@ethersproject/abstract-provider" "^5.4.1"
-    "@ethersproject/abstract-signer" "^5.4.1"
-    "@ethersproject/contracts" "^5.4.1"
-    "@ethersproject/hardware-wallets" "^5.4.0"
-
 "@metis.io/core-utils@^0.6.1":
   version "0.6.1"
   resolved "https://registry.yarnpkg.com/@metis.io/core-utils/-/core-utils-0.6.1.tgz#0db5e95c8e75d87a7a5b37b748a303d98eca909f"
@@ -13402,9 +13391,9 @@ protocols@^2.0.1:
   integrity sha512-/XJ368cyBJ7fzLMwLKv1e4vLxOju2MNAIokcr7meSaNcVbWz/CPcW22cP04mwxOErdA5mwjA8Q6w/cdAQxVn7Q==
 
 proxy-addr@~2.0.7:
-  version "2.0.7"
-  resolved "https://registry.yarnpkg.com/proxy-addr/-/proxy-addr-2.0.7.tgz#f19fe69ceab311eeb94b42e70e8c2070f9ba1025"
-  integrity sha512-llQsMLSUDUPT44jdrU/O37qlnifitDP+ZwrmmZcoSKyLKvtZxpyV0n2/bD/N4tBAAZ/gJEdZU7KMraoK1+XYAg==
+  version "2.0.8"
+  resolved "https://registry.yarnpkg.com/proxy-addr/-/proxy-addr-2.0.8.tgz#624e760fd8ab06b1b8320c2f8506d4422cf8e932"
+  integrity sha512-5nnx0yGyVUcY6t9RnWcARWtwT9F1D8O9rt08htPvnd49W1IgZtmLkhu9WfMzQj1cFxjHIO6connUNVW5k7AVyQ==
   dependencies:
     forwarded "0.2.0"
     ipaddr.js "1.9.1"
